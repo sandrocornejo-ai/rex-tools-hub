@@ -1,0 +1,12 @@
+# Datos de entrada/salida
+*.csv
+~$*
+__pycache__/
+*.pyc
+.env
+.streamlit/
+parametros_mensuales.db
+liquidaciones_*.xlsx
+migracion_*.xlsx
+salida_rex*.xlsx
+log_errores_*.xlsx
