@@ -525,8 +525,19 @@ def render_parametros():
 # FUNCIONES DE PROCESAMIENTO
 # ─────────────────────────────────────────────
 def extraer_fecha_proceso(nombre_archivo):
-    """Extrae los últimos 6 chars antes de .csv → formato aaaa-mm"""
+    """Extrae la fecha aaaa-mm del nombre del archivo.
+    Soporta formatos: 787065406_202607.csv  y  78706540-6_2026-07.csv"""
     base = os.path.splitext(nombre_archivo)[0]
+    # Primero intenta aaaa-mm al final
+    m = re.search(r'(\d{4})-(\d{2})$', base)
+    if m:
+        return f"{m.group(1)}-{m.group(2)}"
+    # Si no, intenta 6 dígitos aaaammm al final
+    m = re.search(r'(\d{6})$', base)
+    if m:
+        s = m.group(1)
+        return f"{s[:4]}-{s[4:]}"
+    # Fallback: últimos 6 chars
     sufijo = base[-6:]
     return f"{sufijo[:4]}-{sufijo[4:]}"
 
@@ -1271,6 +1282,10 @@ with nav_migracion:
                     df, df_empl = normalizar_rexplus(df)
                     df_empl_acum = pd.concat([df_empl_acum, df_empl], ignore_index=True).drop_duplicates(subset=["Rut"])
                     refs["listado_empleados"] = df_empl_acum
+                else:
+                    # Archivo LRE descargado desde DT: renombrar columna sin espacio
+                    if "Rut trabajador(1101)" in df.columns:
+                        df = df.rename(columns={"Rut trabajador(1101)": "Rut trabajador (1101)"})
 
                 # ── Validar estructura del CSV ──
                 if df.empty:
@@ -1291,6 +1306,7 @@ with nav_migracion:
                     df["_fecha_proceso"] = df["Fecha de proceso"].astype(str).str[:7].str.strip()
                 else:
                     fecha_proceso = extraer_fecha_proceso(archivo.name)
+                    df["_fecha_proceso"] = fecha_proceso
 
                 dfs.append(df)
             barra_val.progress(100, text="✅ Validaciones completadas")
