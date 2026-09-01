@@ -233,12 +233,22 @@ CONCEPTOS_AFECTO_AFP = {"mutual", "sis", "trabajoPesaEmpl", "trabajoPesa", "afp"
 CONCEPTOS_AFECTO_CES = {"cesAporteCi", "cesAporteSol", "cesEmpleado"}
 CONCEPTOS_ID_AFP     = {"sis", "afp", "trabajoPesaEmpl", "trabajoPesa", "cesEmpleado", "cesAporteSol", "cesAporteCi"}
 
-# Conceptos que NO deben tener código LRE asignado en equiv_conceptos
+# ─────────────────────────────────────────────
+# REGLAS DE CÓDIGO LRE PARA APORTE EMPLEADOR
+# ─────────────────────────────────────────────
+# Conceptos de tipo Aporte Empleador que NO deben tener Código LRE.
 CONCEPTOS_SIN_LRE_DT = {
     "cajaComp", "reliquidaCcaf", "aporteAFPemp", "reliquidaAporteAFP",
     "aporteFAPPCEV", "reliquidaAporteCEV", "aporteFAPPBAC", "reliquidaAporteBAC",
     "aportesegurocovid",
 }
+
+# Conceptos de tipo Aporte Empleador obsoletos: se ignoran en la validación
+# (ya no se usan en Rex+ y no tienen código LRE asignado intencionalmente).
+CONCEPTOS_OBSOLETOS_APORTE_EMPL = {
+    "ley21227_afp", "ley21227_salud", "ley21227_cajaco",
+}
+
 
 def verificar_conceptos_prohibidos_dt(equiv_df):
     """
@@ -284,6 +294,111 @@ def mostrar_alerta_conceptos_prohibidos_dt(hallazgos):
         </table>
     </div>
     """, unsafe_allow_html=True)
+
+
+# ─────────────────────────────────────────────
+# VALIDACIÓN DE LISTA DE CONCEPTOS (Aporte Empleador)
+# ─────────────────────────────────────────────
+def validar_lista_conceptos(df_lista):
+    """
+    Valida las reglas de Código LRE para conceptos tipo 'Aporte Empleador'
+    en el archivo Lista_de_conceptos.xlsx.
+
+    Regla 1: Los conceptos en CONCEPTOS_SIN_LRE_DT deben tener Código LRE vacío.
+    Regla 2: El resto de Aporte Empleador activos (excluidos CONCEPTOS_OBSOLETOS_APORTE_EMPL)
+             deben tener Código LRE asignado.
+
+    Retorna dict {"r1": [...anomalías R1...], "r2": [...anomalías R2...]}.
+    Cada anomalía es un dict con keys Concepto, Nombre (y Código LRE para R1).
+    """
+    if df_lista is None or df_lista.empty:
+        return {"r1": [], "r2": []}
+
+    cols_req = {"Concepto", "Tipo", "Código LRE"}
+    if not cols_req.issubset(df_lista.columns):
+        return {"r1": [], "r2": []}
+
+    aportes = df_lista[df_lista["Tipo"] == "Aporte Empleador"].copy()
+    activos = aportes[~aportes["Concepto"].isin(CONCEPTOS_OBSOLETOS_APORTE_EMPL)]
+
+    def tiene_codigo(val):
+        return pd.notna(val) and str(val).strip().lower() not in ("", "nan")
+
+    # Regla 1: los 9 definidos deben estar SIN código
+    r1 = []
+    for _, row in activos[activos["Concepto"].isin(CONCEPTOS_SIN_LRE_DT)].iterrows():
+        if tiene_codigo(row["Código LRE"]):
+            r1.append({
+                "Concepto":     row["Concepto"],
+                "Nombre":       row.get("Nombre", ""),
+                "Código LRE":   row["Código LRE"],
+            })
+
+    # Regla 2: el resto debe tener código
+    r2 = []
+    for _, row in activos[~activos["Concepto"].isin(CONCEPTOS_SIN_LRE_DT)].iterrows():
+        if not tiene_codigo(row["Código LRE"]):
+            r2.append({
+                "Concepto": row["Concepto"],
+                "Nombre":   row.get("Nombre", ""),
+            })
+
+    return {"r1": r1, "r2": r2}
+
+
+def mostrar_resultado_validacion_lista(resultado):
+    """Renderiza en Streamlit el resultado de validar_lista_conceptos."""
+    r1, r2 = resultado["r1"], resultado["r2"]
+
+    if not r1 and not r2:
+        st.markdown("""
+        <div class="alert-success">
+            ✅ <b>Lista de conceptos validada correctamente.</b><br>
+            Todos los Aportes Empleador activos cumplen las reglas de Código LRE.
+        </div>""", unsafe_allow_html=True)
+        return
+
+    if r1:
+        filas = "".join(
+            f"<tr>"
+            f"<td style='padding:4px 14px;font-weight:600;color:#744210'>{h['Concepto']}</td>"
+            f"<td style='padding:4px 14px;color:#744210'>{h['Nombre']}</td>"
+            f"<td style='padding:4px 14px;color:#744210'>{h['Código LRE']}</td>"
+            f"</tr>"
+            for h in r1
+        )
+        st.markdown(f"""
+        <div class="alert-warning">
+            ⚠️ <b>Regla 1 — {len(r1)} concepto(s) con Código LRE que NO deberían tenerlo:</b>
+            <table style='margin-top:10px;border-collapse:collapse'>
+                <thead><tr>
+                    <th style='padding:4px 14px;text-align:left;border-bottom:2px solid #d69e2e;color:#744210'>Concepto</th>
+                    <th style='padding:4px 14px;text-align:left;border-bottom:2px solid #d69e2e;color:#744210'>Nombre</th>
+                    <th style='padding:4px 14px;text-align:left;border-bottom:2px solid #d69e2e;color:#744210'>Código LRE</th>
+                </tr></thead>
+                <tbody>{filas}</tbody>
+            </table>
+        </div>""", unsafe_allow_html=True)
+
+    if r2:
+        filas = "".join(
+            f"<tr>"
+            f"<td style='padding:4px 14px;font-weight:600;color:#742a2a'>{h['Concepto']}</td>"
+            f"<td style='padding:4px 14px;color:#742a2a'>{h['Nombre']}</td>"
+            f"</tr>"
+            for h in r2
+        )
+        st.markdown(f"""
+        <div class="alert-error">
+            ❌ <b>Regla 2 — {len(r2)} Aporte Empleador activo(s) sin Código LRE (deben tenerlo):</b>
+            <table style='margin-top:10px;border-collapse:collapse'>
+                <thead><tr>
+                    <th style='padding:4px 14px;text-align:left;border-bottom:2px solid #c53030;color:#742a2a'>Concepto</th>
+                    <th style='padding:4px 14px;text-align:left;border-bottom:2px solid #c53030;color:#742a2a'>Nombre</th>
+                </tr></thead>
+                <tbody>{filas}</tbody>
+            </table>
+        </div>""", unsafe_allow_html=True)
 
 
 # ─────────────────────────────────────────────
@@ -520,7 +635,8 @@ def resolver_contrato(df_empleados, rut, fecha_proceso):
     if "Rut" not in df_empleados.columns:
         return "", "", False, "Sin columna Rut"
 
-    emp_rows = df_empleados[df_empleados["Rut"] == rut]
+    # FIX: comparación insensible a mayúsculas/minúsculas para el dígito verificador (K/k)
+    emp_rows = df_empleados[df_empleados["Rut"].astype(str).str.upper().str.strip() == str(rut).upper().strip()]
     if emp_rows.empty:
         return "", "", False, "RUT no encontrado en listado de empleados"
 
@@ -818,7 +934,8 @@ def generar_filas_dt(df, fecha_proceso, refs, df_empleados, df_empresas_externo=
         target = filas
         if not ok:
             ruts_problema[rut] = motivo
-            emp_check = df_empleados[df_empleados["Rut"] == rut] if "Rut" in df_empleados.columns else pd.DataFrame()
+            # FIX: comparación insensible a mayúsculas/minúsculas para el dígito verificador (K/k)
+            emp_check = df_empleados[df_empleados["Rut"].astype(str).str.upper().str.strip() == str(rut).upper().strip()] if "Rut" in df_empleados.columns else pd.DataFrame()
             if emp_check.empty:
                 continue  # RUT no encontrado en empleados → excluir completamente
             # RUT encontrado pero contrato no resuelto → segundo archivo con contrato en blanco
@@ -1404,6 +1521,42 @@ def render_modulo_dt(refs_compartidas):
         else:
             st.markdown(
                 '<div class="alert-warning">⚠️ Sube el archivo <b>equiv_conceptos.xlsx</b> para usar una equivalencia personalizada.</div>',
+                unsafe_allow_html=True
+            )
+
+    # ── Validación opcional de Lista de conceptos ──
+    st.markdown('<hr class="rex-divider">', unsafe_allow_html=True)
+    validar_lista_chk = st.checkbox(
+        "¿Deseas validar la Lista de conceptos (Código LRE en Aportes Empleador)?",
+        key="dt_chk_lista_conceptos",
+        value=False,
+        help=(
+            "Sube el archivo Lista_de_conceptos.xlsx para verificar que los Aportes Empleador "
+            "tengan el Código LRE correcto según las reglas definidas."
+        )
+    )
+    if validar_lista_chk:
+        col_lc, _ = st.columns([1, 1])
+        with col_lc:
+            archivo_lista_conceptos = st.file_uploader(
+                "Sube el archivo Lista_de_conceptos.xlsx",
+                type=["xlsx"],
+                key="dt_up_lista_conceptos",
+                help="Exportado desde Rex+. Debe contener columnas: Concepto, Tipo, Código LRE."
+            )
+        if archivo_lista_conceptos:
+            try:
+                df_lista = pd.read_excel(archivo_lista_conceptos)
+                resultado_val = validar_lista_conceptos(df_lista)
+                mostrar_resultado_validacion_lista(resultado_val)
+            except Exception as e_lc:
+                st.markdown(
+                    f'<div class="alert-error">❌ Error al leer el archivo: <b>{e_lc}</b></div>',
+                    unsafe_allow_html=True
+                )
+        else:
+            st.markdown(
+                '<div class="alert-warning">⚠️ Sube el archivo <b>Lista_de_conceptos.xlsx</b> para ejecutar la validación.</div>',
                 unsafe_allow_html=True
             )
 
