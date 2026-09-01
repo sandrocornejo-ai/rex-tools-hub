@@ -1799,13 +1799,6 @@ def render_modulo_dt(refs_compartidas):
                 st.dataframe(df_log_contratos, use_container_width=True, hide_index=True)
 
             log_cont_bytes = generar_excel_log(df_log_contratos)
-            st.download_button(
-                label="⬇️ Descargar log_multiples_contratos.xlsx",
-                data=log_cont_bytes,
-                file_name=f"log_multiples_contratos_{fecha_proceso}.xlsx",
-                mime="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet",
-                key="dt_btn_log_contratos"
-            )
 
         # ── Log Parcial 7 ──
         if log_parcial7_rows:
@@ -1819,14 +1812,6 @@ def render_modulo_dt(refs_compartidas):
                 st.dataframe(pd.DataFrame(log_parcial7_rows), use_container_width=True, hide_index=True)
 
             log_p7_bytes = generar_excel_log_parcial7(log_parcial7_rows)
-            if log_p7_bytes:
-                st.download_button(
-                    label="⬇️ Descargar log_parcial7_sin_imponible.xlsx",
-                    data=log_p7_bytes,
-                    file_name=f"log_parcial7_{fecha_proceso}_{datetime.now().strftime('%Y%m%d_%H%M%S')}.xlsx",
-                    mime="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet",
-                    key="dt_btn_log_parcial7"
-                )
 
         if df_salida.empty:
             st.markdown('<div class="alert-warning">⚠️ No se generaron registros. Verifica que el archivo y los parámetros sean correctos.</div>', unsafe_allow_html=True)
@@ -1854,13 +1839,6 @@ def render_modulo_dt(refs_compartidas):
         barra.progress(95, text="Generando Excel...")
         excel_bytes = generar_excel_dt(df_salida)
         barra.progress(100, text="✅ Proceso completado")
-        st.download_button(
-            label="⬇️ Descargar archivo de salida (.xlsx)",
-            data=excel_bytes,
-            file_name=f"liquidaciones_dt_{fecha_proceso}_{datetime.now().strftime('%Y%m%d_%H%M%S')}.xlsx",
-            mime="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet",
-            key="dt_btn_descarga"
-        )
 
         if not df_salida_sin_contrato.empty:
             st.markdown(f"""
@@ -1868,10 +1846,54 @@ def render_modulo_dt(refs_compartidas):
                 ⚠️ <b>{df_salida_sin_contrato["Id empleado"].nunique()} trabajador(es)</b> con contrato indeterminado fueron incluidos en un segundo archivo sin número de contrato.
             </div>""", unsafe_allow_html=True)
             excel_bytes_sc = generar_excel_dt(df_salida_sin_contrato)
+
+        # Guardar en session_state para que descargas persistan entre reruns
+        _dt_res = {"fecha_proceso": fecha_proceso, "excel_bytes": excel_bytes}
+        if not df_log_contratos.empty:
+            _dt_res["log_cont_bytes"] = log_cont_bytes
+        if log_parcial7_rows and log_p7_bytes:
+            _dt_res["log_p7_bytes"] = log_p7_bytes
+        if not df_salida_sin_contrato.empty:
+            _dt_res["excel_bytes_sc"] = excel_bytes_sc
+        st.session_state["dt_resultados"] = _dt_res
+
+    # Descargas: se renderizan fuera del bloque del boton para persistir entre reruns
+    if "dt_resultados" in st.session_state:
+        _res = st.session_state["dt_resultados"]
+        _fp  = _res["fecha_proceso"]
+        _ts  = __import__("datetime").datetime.now().strftime("%Y%m%d_%H%M%S")
+        st.download_button(
+            label="⬇️ Descargar archivo de salida (.xlsx)",
+            data=_res["excel_bytes"],
+            file_name=f"liquidaciones_dt_{_fp}_{_ts}.xlsx",
+            mime="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet",
+            key="dt_btn_descarga"
+        )
+        if "log_cont_bytes" in _res:
+            st.download_button(
+                label="⬇️ Descargar log_multiples_contratos.xlsx",
+                data=_res["log_cont_bytes"],
+                file_name=f"log_multiples_contratos_{_fp}.xlsx",
+                mime="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet",
+                key="dt_btn_log_contratos"
+            )
+        if "log_p7_bytes" in _res:
+            st.download_button(
+                label="⬇️ Descargar log_parcial7_sin_imponible.xlsx",
+                data=_res["log_p7_bytes"],
+                file_name=f"log_parcial7_{_fp}_{_ts}.xlsx",
+                mime="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet",
+                key="dt_btn_log_parcial7"
+            )
+        if "excel_bytes_sc" in _res:
             st.download_button(
                 label="⬇️ Descargar registros sin contrato (.xlsx)",
-                data=excel_bytes_sc,
-                file_name=f"liquidaciones_dt_sin_contrato_{fecha_proceso}_{datetime.now().strftime('%Y%m%d_%H%M%S')}.xlsx",
+                data=_res["excel_bytes_sc"],
+                file_name=f"liquidaciones_dt_sin_contrato_{_fp}_{_ts}.xlsx",
                 mime="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet",
                 key="dt_btn_descarga_sc"
             )
+        st.markdown("---")
+        if st.button("🔄 Nuevo proceso", key="dt_btn_nuevo_proceso"):
+            del st.session_state["dt_resultados"]
+            st.rerun()
