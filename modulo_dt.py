@@ -1040,6 +1040,10 @@ def generar_filas_dt(df, fecha_proceso, refs, df_empleados, df_empresas_externo=
         # ── Generar fila por cada concepto ──
         for id_concepto, monto in montos_por_concepto.items():
 
+            # FIX: licenciaDias se agrega explícitamente después del loop → evitar duplicado
+            if id_concepto == "licenciaDias":
+                continue
+
             if licencia_mes_completo and id_concepto not in CONCEPTOS_LICENCIA_COMPLETA:
                 continue
 
