@@ -148,8 +148,22 @@ def _norm_col(s):
 
 def safe_num(val, default=0):
     """Convierte a float, retorna default si falla."""
+    import math
+    if isinstance(val, (int, float)):
+        try:
+            return default if math.isnan(float(val)) else float(val)
+        except Exception:
+            return default
     try:
-        return float(str(val).replace("$", "").replace(".", "").replace(",", ".").strip())
+        s = str(val).strip().replace("$", "").replace("\xa0", "").replace(" ", "")
+        # Formato chileno: 1.234.567 (puntos = miles, coma = decimal)
+        if s.count(".") > 1:
+            s = s.replace(".", "").replace(",", ".")
+        elif "," in s and "." in s:
+            s = s.replace(".", "").replace(",", ".")
+        elif "," in s:
+            s = s.replace(",", ".")
+        return float(s)
     except Exception:
         return default
 
@@ -606,7 +620,13 @@ def calcular_parcial8(concepto, cesEmpleado_afecto):
 # ETL PRINCIPAL
 # ─────────────────────────────────────────────
 def obtener_rut_libro(df_libro):
-    """Detecta la columna RUT en el Libro."""
+    """Detecta la columna RUT del trabajador en el Libro."""
+    # Prioridad: columna que tenga "trabajador" o "empleado"
+    for kw in ("trabajador", "empleado"):
+        for c in df_libro.columns:
+            if "rut" in c.lower() and kw in c.lower():
+                return c
+    # Fallback: primera columna con "rut"
     candidatos = [c for c in df_libro.columns if "rut" in c.lower()]
     if candidatos:
         return candidatos[0]
@@ -698,6 +718,9 @@ def generar_archivo_salida(
         col_total_afectos = next((c for c in df_libro.columns if "total" in c.lower() and "afect" in c.lower()), None)
         if not col_total_afectos:
             col_total_afectos = next((c for c in df_libro.columns if "total haber" in c.lower() and "impon" in c.lower()), None)
+        if not col_total_afectos:
+            # Libro Talana: "Remuneración Imponible"
+            col_total_afectos = next((c for c in df_libro.columns if "imponible" in c.lower() and "remunera" in c.lower()), None)
         if col_total_afectos:
             suma_afectos = safe_num(libro_row.get(col_total_afectos, 0))
 
@@ -707,9 +730,15 @@ def generar_archivo_salida(
         # Calcular Parcial 8 base (necesita cesEmp_afecto)
         # Lo calculamos por empleado y lo reutilizamos
 
+        _conceptos_ya_vistos = set()
         for mapping in equiv_activos:
             concepto  = mapping["concepto"]
             libro_cols= mapping["libro_cols"]
+            # Deduplicar conceptos que usan COLS fijas (isapre)
+            if concepto in GRUPO_ISAPRE_INST:
+                if concepto in _conceptos_ya_vistos:
+                    continue
+                _conceptos_ya_vistos.add(concepto)
 
             # ── Monto del concepto ──
             if concepto in GRUPO_ISAPRE_INST:
