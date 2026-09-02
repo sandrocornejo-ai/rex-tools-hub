@@ -8,6 +8,13 @@ import io
 import re
 import unicodedata
 from datetime import datetime
+import sys
+sys.path.insert(0, os.path.join(os.path.dirname(__file__), ".."))
+try:
+    from modulo_dt import resolver_contrato as _resolver_contrato, cargar_empleados as _cargar_empleados
+    _MODULO_DT_OK = True
+except Exception:
+    _MODULO_DT_OK = False
 
 # ─────────────────────────────────────────────
 # CONFIGURACIÓN
@@ -626,15 +633,19 @@ def inferir_mes_desde_nombre(nombre_archivo):
 def _norm_str(s):
     return str(s or "").lower().strip().replace(" ", "").replace("-", "").replace("_", "")
 
-def lookup_contrato(rut_norm, fecha_ingreso_pdf, df_empleados):
-    """Busca contrato por RUT en listado_empleados. Opcionalmente valida fecha ingreso."""
+def lookup_contrato(rut_norm, fecha_proceso, df_empleados):
+    """Busca contrato por RUT y mes de proceso en listado_empleados."""
     if df_empleados is None or df_empleados.empty:
         return ""
+    if _MODULO_DT_OK:
+        contrato, _, ok, _ = _resolver_contrato(df_empleados, rut_norm, fecha_proceso)
+        return str(contrato) if ok else ""
+    # Fallback sin modulo_dt
     col_rut = next((c for c in df_empleados.columns if "rut" in c.lower()), None)
     col_con = next((c for c in df_empleados.columns if "contrato" in c.lower()), None)
     if not col_rut or not col_con:
         return ""
-    mask = df_empleados[col_rut].apply(normalizar_rut) == rut_norm
+    mask = df_empleados[col_rut].astype(str).str.upper().str.strip() == str(rut_norm).upper().strip()
     fila = df_empleados[mask]
     if fila.empty:
         return ""
@@ -808,7 +819,7 @@ def generar_archivo_salida(
         rut_fmt      = formatear_rut(rut_norm)
         pdf_emp      = pdf_dict.get(rut_norm, {})
         pdf_emp_hist = get_emp_sin_licencia(rut_norm, pdf_dict_historico)
-        contrato     = lookup_contrato(rut_norm, pdf_emp.get("fecha_ingreso", ""), df_empleados)
+        contrato     = lookup_contrato(rut_norm, mes_proceso, df_empleados)
 
         # Empresa Rex+
         emp_nombre   = lookup_empresa_empleado(rut_norm, df_empleados)
@@ -1220,8 +1231,11 @@ if st.button("▶ Generar archivo de importación Rex+"):
         df_params    = refs_params.copy()
 
         if archivo_empleados:
-            df_empleados = pd.read_excel(archivo_empleados)
-            df_empleados.columns = [str(c).strip() for c in df_empleados.columns]
+            if _MODULO_DT_OK:
+                df_empleados = _cargar_empleados(archivo_empleados)
+            else:
+                df_empleados = pd.read_excel(archivo_empleados, header=1)
+                df_empleados.columns = [str(c).strip() for c in df_empleados.columns]
 
         if archivo_empresas:
             df_empresas = pd.read_excel(archivo_empresas, header=1)
