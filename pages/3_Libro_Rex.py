@@ -16,6 +16,9 @@ DATA_DIR = "data"
 ARCHIVO_PARAMS  = os.path.join(DATA_DIR, "parametrosMesuales.xlsx")
 ARCHIVO_EQUIV   = os.path.join(DATA_DIR, "equivalencias_libro_rex.xlsx")
 ARCHIVO_EMPRESAS = os.path.join(DATA_DIR, "listado_empresas.xlsx")
+ARCHIVO_AFP      = os.path.join(DATA_DIR, "inst_afp.xlsx")
+ARCHIVO_SALUD    = os.path.join(DATA_DIR, "inst_salud.xlsx")
+ARCHIVO_MUTUALES = os.path.join(DATA_DIR, "inst_mutuales.xlsx")
 
 USA_FASES = False   # Cambiar a True si la empresa usa Fases en Rex+
 
@@ -270,6 +273,96 @@ def build_equiv_list(df_equiv):
 # ─────────────────────────────────────────────
 # PARSEO DE PDF DE LIQUIDACIONES
 # ─────────────────────────────────────────────
+# ─────────────────────────────────────────────
+# LOOKUP AFP
+# ─────────────────────────────────────────────
+@st.cache_data
+def cargar_inst_afp():
+    """Devuelve dict: nombre_normalizado → id_afp."""
+    try:
+        df = pd.read_excel(ARCHIVO_AFP, dtype=str)
+        mapping = {}
+        for _, row in df.iterrows():
+            nombre = str(row.get("nombre_afp", "") or "").strip().lower()
+            id_afp = str(row.get("id_afp", "") or "").strip()
+            if nombre and id_afp:
+                # "afp provida" → "provida"
+                clave = re.sub(r"^afp\s+", "", nombre).strip()
+                mapping[clave] = id_afp
+                mapping[nombre] = id_afp  # también con prefijo
+        return mapping
+    except Exception:
+        return {}
+
+def nombre_a_id_afp(nombre_pdf, inst_afp_dict):
+    """Convierte nombre AFP del PDF (ej. 'Provida') → id_afp (ej. 'provida')."""
+    if not nombre_pdf:
+        return ""
+    key = nombre_pdf.strip().lower()
+    if key in inst_afp_dict:
+        return inst_afp_dict[key]
+    # sin prefijo "afp "
+    key2 = re.sub(r"^afp\s+", "", key).strip()
+    return inst_afp_dict.get(key2, nombre_pdf.lower())
+
+@st.cache_data
+def cargar_inst_salud():
+    """Devuelve dict: nombre_normalizado → id_inst (isapre/fonasa)."""
+    try:
+        df = pd.read_excel(ARCHIVO_SALUD, dtype=str)
+        mapping = {}
+        for _, row in df.iterrows():
+            nombre = str(row.get("nombre_inst", "") or "").strip().lower()
+            id_i   = str(row.get("id_inst", "") or "").strip()
+            if nombre and id_i:
+                mapping[nombre] = id_i
+                # sin prefijo "isapre "
+                clave = re.sub(r"^isapre\s+", "", nombre).strip()
+                mapping[clave] = id_i
+        return mapping
+    except Exception:
+        return {}
+
+def nombre_a_id_salud(nombre_pdf, inst_salud_dict):
+    if not nombre_pdf:
+        return ""
+    key = nombre_pdf.strip().lower()
+    if key in inst_salud_dict:
+        return inst_salud_dict[key]
+    key2 = re.sub(r"^isapre\s+", "", key).strip()
+    return inst_salud_dict.get(key2, nombre_pdf.lower())
+
+@st.cache_data
+def cargar_inst_mutuales():
+    """Devuelve dict: nombre_normalizado → id_mutual."""
+    try:
+        df = pd.read_excel(ARCHIVO_MUTUALES, dtype=str)
+        mapping = {}
+        for _, row in df.iterrows():
+            nombre = str(row.get("nombre_mutual", "") or "").strip().lower()
+            id_m   = str(row.get("id_mutual", "") or "").strip()
+            if nombre and id_m:
+                mapping[nombre] = id_m
+                # variantes cortas
+                for prefix in ("asociacion chilena de seguridad", "mutual de seguridad", "instituto de seguridad del trabajo"):
+                    if nombre.startswith(prefix):
+                        mapping[prefix] = id_m
+        return mapping
+    except Exception:
+        return {}
+
+def nombre_a_id_mutual(nombre_pdf, inst_mutuales_dict):
+    if not nombre_pdf:
+        return ""
+    key = nombre_pdf.strip().lower()
+    if key in inst_mutuales_dict:
+        return inst_mutuales_dict[key]
+    # búsqueda parcial
+    for k, v in inst_mutuales_dict.items():
+        if k and k in key:
+            return v
+    return nombre_pdf.lower()
+
 def _match(pattern, text, group=1, flags=re.IGNORECASE):
     m = re.search(pattern, text, flags)
     return m.group(group).strip() if m else None
@@ -690,6 +783,10 @@ def generar_archivo_salida(
     elif "peya" in nombre_libro.lower() or "ecommerce" in nombre_libro.lower() or "delivery hero ec" in nombre_libro.lower():
         empresa_libro = "DH E-Commerce"
 
+    inst_afp_dict     = cargar_inst_afp()
+    inst_salud_dict   = cargar_inst_salud()
+    inst_mutuales_dict= cargar_inst_mutuales()
+
     equiv_activos = [
         m for m in equiv_list
         if m["concepto"] and m.get("tipo","").lower() != "dato" and (
@@ -781,15 +878,18 @@ def generar_archivo_salida(
             afecto = calcular_afecto(concepto, pdf_emp, suma_afectos, params, cesEmp_afecto, pdf_emp_hist=pdf_emp_hist)
 
             # ── Id de institución ──
+            _CES_AFP = {"cesEmpleado", "cesAporteCi", "cesAporteSol",
+                        "reliquidaCesEmpl", "reliquidaCesSol", "reliquidaCesCi"}
+            _FAPP    = {"aporteFAPPCEV", "reliquidaAporteCEV"}
             id_inst = ""
-            if concepto in GRUPO_AFP_INST:
-                id_inst = pdf_emp.get("afp_nombre", "")
+            if concepto in GRUPO_AFP_INST or concepto in _CES_AFP:
+                id_inst = nombre_a_id_afp(pdf_emp.get("afp_nombre", ""), inst_afp_dict)
+            elif concepto in _FAPP:
+                id_inst = "seguridadsocial"
             elif concepto in GRUPO_ISAPRE_INST:
-                id_inst = pdf_emp.get("salud_nombre", "")
+                id_inst = nombre_a_id_salud(pdf_emp.get("salud_nombre", ""), inst_salud_dict)
             elif concepto in GRUPO_MUTUAL_INST:
-                id_inst = mutual_nombre
-            elif concepto in GRUPO_CES_INST:
-                id_inst = "AFC"
+                id_inst = nombre_a_id_mutual(mutual_nombre, inst_mutuales_dict)
 
             # ── Cotización jubilación ──
             cot_jubilacion = ""
