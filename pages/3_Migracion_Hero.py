@@ -915,20 +915,29 @@ def generar_archivo_salida(
                 _col_norm_idx[key2] = c
 
     # Columnas del libro para rebajas LLSS (concepto impuesto)
-    # Busca una columna por cada código/keyword; guarda la primera que encuentre
-    _REBAJA_LLSS_KWS = [
-        ["1006", "apv regimen b", "apv-b", "apvb"],   # APV Régimen B
-        ["1523", "seg cesantia", "cesantia"],           # Seguro Cesantía
-        ["1524", "fonasa"],                             # Cotización FONASA
-        ["1520", "isapre"],                             # Cotización ISAPRE
-    ]
+    # = suma de todos los haberes exentos del libro
+    # Primero buscar columna resumen "Remuneración No Imponible"
+    _col_no_imponible = next(
+        (c for c in df_libro.columns if "no imponible" in c.lower() or
+         ("remunera" in c.lower() and "exento" in c.lower())),
+        None
+    )
+    # Códigos haberes exentos para suma por columnas individuales (fallback)
+    _CODIGOS_EXENTOS_LIBRO = {
+        "0234", "0232", "0233", "0247", "0094", "0095",
+        "0241", "0243", "0245", "0268", "0253", "0269",
+        "0231", "0902", "0907", "0908", "0910",
+    }
     _cols_rebaja_llss = []
-    for _kws in _REBAJA_LLSS_KWS:
+    if not _col_no_imponible:
         for _col in df_libro.columns:
-            _col_l = _col.lower()
-            if any(kw in _col_l for kw in _kws):
-                _cols_rebaja_llss.append(_col)
-                break  # una columna por grupo
+            _col_l = _col.strip()
+            # Columna comienza con un código de 4 dígitos que está en la lista
+            m_cod = re.match(r"^0?(\d{3,4})", _col_l)
+            if m_cod:
+                cod4 = m_cod.group(0).zfill(4)
+                if cod4 in _CODIGOS_EXENTOS_LIBRO:
+                    _cols_rebaja_llss.append(_col)
 
     # Filtrar equivalencias válidas para esta empresa (según nombre archivo)
     empresa_libro = ""
@@ -1095,10 +1104,13 @@ def generar_archivo_salida(
             # ── Total rebajas LLSS ──
             total_rebajas_llss = 0
             if concepto in GRUPO_AFECTO_IMPUESTO:
-                # Suma desde libro: 1006 APV-B + 1524 FONASA + 1520 ISAPRE + 1523 Seg.Ces.
-                total_rebajas_llss = sum(
-                    safe_num(libro_row.get(c, 0)) for c in _cols_rebaja_llss
-                )
+                # Suma haberes exentos del libro
+                if _col_no_imponible:
+                    total_rebajas_llss = safe_num(libro_row.get(_col_no_imponible, 0))
+                else:
+                    total_rebajas_llss = sum(
+                        safe_num(libro_row.get(c, 0)) for c in _cols_rebaja_llss
+                    )
 
             # ── Rentas no gravadas ──
             rentas_no_gravadas = 0
