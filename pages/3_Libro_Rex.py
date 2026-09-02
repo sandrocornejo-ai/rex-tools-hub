@@ -290,20 +290,41 @@ def parsear_pagina_pdf(text):
     if fi:
         emp["fecha_ingreso"] = fi
 
-    # Días trabajados y licencia — buscar en cada línea
+    # Días trabajados y licencia
+    # TALANA: la fila de labels y la fila de valores son líneas separadas
+    # Ejemplo:
+    #   "Días Trabajados:    Días Licencia    Días Ausencia    Horas Base"
+    #   "30    0    0    42,0"
     emp["dias_trabajados"] = 0
     emp["dias_licencia"]   = 0
     emp["horas_base"]      = 0
-    for line in lines:
+    for i, line in enumerate(lines):
+        # Intento 1: label y valor en la misma línea (formato antiguo)
         if not emp["dias_trabajados"]:
-            m = re.search(r"[Dd](?:í|i)as?\s+[Tt]rab(?:ajados?)?[\s:]+(\d+)", line)
-            if m: emp["dias_trabajados"] = int(m.group(1))
+            m = re.search(r"[Dd][ií]as?\s+[Tt]rab(?:ajados?)?[\s:]+([\d]+)", line)
+            if m:
+                emp["dias_trabajados"] = int(m.group(1))
         if not emp["dias_licencia"]:
-            m = re.search(r"[Dd](?:í|i)as?\s+[Ll]icencia[\s:]+(\d+)", line)
-            if m: emp["dias_licencia"] = int(m.group(1))
+            m = re.search(r"[Dd][ií]as?\s+[Ll]icencia[\s:]+([\d]+)", line)
+            if m:
+                emp["dias_licencia"] = int(m.group(1))
         if not emp["horas_base"]:
-            m = re.search(r"[Hh]oras?\s+[Bb]ase[\s:]+(\d+)", line)
-            if m: emp["horas_base"] = int(m.group(1))
+            m = re.search(r"[Hh]oras?\s+[Bb]ase[\s:]+([\d]+)", line)
+            if m:
+                emp["horas_base"] = int(m.group(1))
+        # Intento 2: TALANA tabla — label en línea i, valores en línea i+1
+        if re.search(r"[Dd][ií]as?\s+[Tt]rab", line) and re.search(r"[Dd][ií]as?\s+[Ll]icencia", line):
+            # Línea siguiente contiene los valores numéricos separados por espacios
+            next_line = lines[i + 1].strip() if i + 1 < len(lines) else ""
+            nums = re.findall(r"(\d+)(?:[,.]\d+)?", next_line)
+            if nums:
+                # Orden en el PDF: Días Trab | Días Lic | Días Ausencia | Horas Base
+                if not emp["dias_trabajados"] and len(nums) >= 1:
+                    emp["dias_trabajados"] = int(nums[0])
+                if not emp["dias_licencia"] and len(nums) >= 2:
+                    emp["dias_licencia"] = int(nums[1])
+                if not emp["horas_base"] and len(nums) >= 4:
+                    emp["horas_base"] = int(nums[3])
 
     # Sueldo base (código 0001 o 1000)
     emp["sueldo_base"] = 0
@@ -671,7 +692,7 @@ def generar_archivo_salida(
 
     equiv_activos = [
         m for m in equiv_list
-        if m["concepto"] and (
+        if m["concepto"] and m.get("tipo","").lower() != "dato" and (
             not empresa_libro or                                         # sin empresa detectada: aceptar todo
             m["empresa"].lower() in ("ambas", "ambas empresas", "") or
             empresa_libro.lower() in m["empresa"].lower()
