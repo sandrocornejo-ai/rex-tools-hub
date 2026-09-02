@@ -421,10 +421,23 @@ def parsear_pagina_pdf(text):
         emp["rut_display"] = rut_raw.replace(" ", "")
         emp["rut"] = normalizar_rut(rut_raw)
 
-    # Fecha ingreso
-    fi = _match(r"[Ff]echa\s+[Ii]ngreso[\s:]+(\d{2}/\d{2}/\d{4})", text)
-    if fi:
-        emp["fecha_ingreso"] = fi
+    # Fecha ingreso TALANA: "Fecha de Ingreso: 31 de Agosto de 2020"
+    fi_m = re.search(
+        r"[Ff]echa\s+de\s+[Ii]ngreso[\s:]+(\d{1,2})\s+de\s+(\w+)\s+de\s+(\d{4})",
+        text, re.IGNORECASE
+    )
+    if fi_m:
+        _dia  = fi_m.group(1).zfill(2)
+        _mes  = MESES_ES.get(fi_m.group(2).lower(), 0)
+        _anio = fi_m.group(3)
+        if _mes:
+            emp["fecha_ingreso_ddmmaaaa"] = f"{_dia}-{str(_mes).zfill(2)}-{_anio}"
+    else:
+        # Fallback formato dd/mm/aaaa
+        fi = _match(r"[Ff]echa\s+[Ii]ngreso[\s:]+(\d{2}/\d{2}/\d{4})", text)
+        if fi:
+            p = fi.split("/")
+            emp["fecha_ingreso_ddmmaaaa"] = f"{p[0]}-{p[1]}-{p[2]}"
 
     # Días trabajados y licencia
     # TALANA: la fila de labels y la fila de valores son líneas separadas
@@ -669,6 +682,42 @@ def inferir_mes_desde_nombre(nombre_archivo):
 def _norm_str(s):
     return str(s or "").lower().strip().replace(" ", "").replace("-", "").replace("_", "")
 
+def lookup_contrato_por_rut_inicio(rut_display, fecha_ingreso_ddmmaaaa, df_empleados):
+    """Busca contrato en listado_empleados por clave RUT+FechaInicioContrato.
+    Clave = RUT sin puntos (con guion) + fecha dd-mm-aaaa.
+    Ej: '13552925-7' + '23-08-2021' → '13552925-723-08-2021'
+    Columnas esperadas: 'Rut' y 'Fecha Inicio contrato'."""
+    if df_empleados is None or df_empleados.empty or not rut_display or not fecha_ingreso_ddmmaaaa:
+        return ""
+    rut_pdf   = re.sub(r"\.", "", str(rut_display)).strip()   # "13552925-7"
+    clave_pdf = rut_pdf + fecha_ingreso_ddmmaaaa               # "13552925-723-08-2021"
+
+    col_rut = next((c for c in df_empleados.columns if c.strip().lower() == "rut"), None)
+    col_fin = next((c for c in df_empleados.columns
+                    if "fecha" in c.strip().lower() and "inicio" in c.strip().lower()), None)
+    col_con = next((c for c in df_empleados.columns if "contrato" in c.strip().lower()), None)
+    if not col_rut or not col_fin or not col_con:
+        return ""
+
+    from datetime import datetime as _dt
+    for _, row in df_empleados.iterrows():
+        rut_emp = re.sub(r"\.", "", str(row.get(col_rut, "") or "")).strip()
+        fi_val  = row.get(col_fin, "")
+        if hasattr(fi_val, "strftime"):
+            fi_str = fi_val.strftime("%d-%m-%Y")
+        else:
+            fi_str = str(fi_val).strip()
+            for fmt in ("%d/%m/%Y", "%Y-%m-%d", "%d-%m-%Y"):
+                try:
+                    fi_str = _dt.strptime(fi_str, fmt).strftime("%d-%m-%Y")
+                    break
+                except Exception:
+                    continue
+        if (rut_emp + fi_str) == clave_pdf:
+            return str(row.get(col_con, "")).strip()
+    return ""
+
+
 def lookup_contrato(rut_norm, fecha_proceso, df_empleados):
     """Busca contrato por RUT y mes de proceso en listado_empleados."""
     if df_empleados is None or df_empleados.empty:
@@ -874,7 +923,11 @@ def generar_archivo_salida(
         rut_fmt      = formatear_rut(rut_norm)
         pdf_emp      = pdf_dict.get(rut_norm, {})
         pdf_emp_hist = get_emp_sin_licencia(rut_norm, pdf_dict_historico)
-        contrato     = lookup_contrato(rut_norm, mes_proceso, df_empleados)
+        _rut_display = pdf_emp.get("rut_display", "")
+        _fi_ddmm     = pdf_emp.get("fecha_ingreso_ddmmaaaa", "")
+        contrato     = lookup_contrato_por_rut_inicio(_rut_display, _fi_ddmm, df_empleados)
+        if not contrato:
+            contrato = lookup_contrato(rut_norm, mes_proceso, df_empleados)
 
         # Empresa Rex+
         emp_nombre   = lookup_empresa_empleado(rut_norm, df_empleados)
