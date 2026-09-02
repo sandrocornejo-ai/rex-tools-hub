@@ -6,6 +6,7 @@ from openpyxl.styles import Font, PatternFill, Alignment, Border, Side
 import os
 import io
 import re
+import unicodedata
 from datetime import datetime
 
 # ─────────────────────────────────────────────
@@ -126,16 +127,25 @@ GRUPO_PARCIAL8 = {"cesAporteSol", "cesAporteCi", "reliquidaCesSol", "reliquidaCe
 
 # Isapre: monto = suma de 3 columnas específicas del Libro
 COLS_ISAPRE_LIBRO = [
+    # Nombres reales en el Libro Peya/Stores
+    "Isapre",
+    "Isapre sobre 7%",
     "1524 COTIZACION FONASA",
+    # aliases alternativos
     "1520 COTIZACION ISAPRE",
     "1521 COTIZACION ISAPRE ADICIONAL",
-    # aliases posibles
     "1524 Cotización FONASA", "1520 Cotizacion ISAPRE", "1521 Cotizacion ISAPRE Adicional",
 ]
 
 # ─────────────────────────────────────────────
 # UTILIDADES
 # ─────────────────────────────────────────────
+def _norm_col(s):
+    s = str(s).strip().lower()
+    s = unicodedata.normalize("NFD", s)
+    s = "".join(c for c in s if unicodedata.category(c) != "Mn")
+    return re.sub(r"\s+", " ", s)
+
 def safe_num(val, default=0):
     """Convierte a float, retorna default si falla."""
     try:
@@ -228,10 +238,12 @@ def build_equiv_list(df_equiv):
     result = []
     for _, row in df_equiv.iterrows():
         concepto = str(row.get(col_concepto, "") or "").strip()
-        if not concepto or concepto.lower() in ("nan", ""):
+        # Excluir filas sin concepto real
+        if not concepto or concepto.lower() in ("nan", "") or concepto in ("—", "-", "(campo Afecto)"):
             continue
         cols_raw = str(row.get(col_libro, "") or "").strip()
-        libro_cols = [c.strip() for c in re.split(r"[|;]", cols_raw) if c.strip() and c.strip().lower() != "nan"]
+        # Separadores: "/" "|" ";" — el Libro Talana usa "/"
+        libro_cols = [c.strip() for c in re.split(r"[/|;]", cols_raw) if c.strip() and c.strip().lower() != "nan"]
         result.append({
             "concepto":   concepto,
             "nombre":     str(row.get(col_nombre, "") or "").strip(),
@@ -434,14 +446,29 @@ def get_emp_sin_licencia(rut_norm, pdf_dict_historico):
 # CARGA Y DETECCIÓN DEL LIBRO
 # ─────────────────────────────────────────────
 def cargar_libro(xlsx_bytes):
-    """Carga el Libro de Remuneraciones. Retorna (DataFrame, mes_inferido, empresa_inferida)."""
-    df = pd.read_excel(io.BytesIO(xlsx_bytes), dtype=str)
+    """Carga el Libro de Remuneraciones. Auto-detecta fila de encabezados."""
+    # 1ra pasada: leer sin header para buscar la fila que contiene "RUT"
+    raw = pd.read_excel(io.BytesIO(xlsx_bytes), header=None, dtype=str)
+    header_row = 0
+    for i, row in raw.iterrows():
+        vals = [str(v).strip().upper() for v in row.values if pd.notna(v)]
+        if any("RUT" in v for v in vals):
+            header_row = i
+            break
+
+    # 2da pasada: leer con el header correcto
+    df = pd.read_excel(io.BytesIO(xlsx_bytes), header=header_row, dtype=str)
     df.columns = [str(c).strip() for c in df.columns]
+    # Eliminar filas completamente vacías
+    df = df.dropna(how="all").reset_index(drop=True)
     # Convertir columnas numéricas
     for col in df.columns:
-        converted = pd.to_numeric(df[col].str.replace(",", ".", regex=False), errors="coerce")
-        if converted.notna().sum() > len(df) * 0.3:
-            df[col] = converted
+        try:
+            converted = pd.to_numeric(df[col].str.replace(",", ".", regex=False), errors="coerce")
+            if converted.notna().sum() > len(df) * 0.3:
+                df[col] = converted
+        except Exception:
+            pass
     return df
 
 
@@ -604,6 +631,17 @@ def generar_archivo_salida(
     if not col_rut:
         return None, "No se encontró columna RUT en el Libro."
 
+    _col_norm_idx = {}
+    for c in df_libro.columns:
+        key = _norm_col(c)
+        if key not in _col_norm_idx:
+            _col_norm_idx[key] = c
+        m_dup = re.match(r"^(.+)\.\d+$", c)
+        if m_dup:
+            key2 = _norm_col(m_dup.group(1))
+            if key2 not in _col_norm_idx:
+                _col_norm_idx[key2] = c
+
     # Filtrar equivalencias válidas para esta empresa (según nombre archivo)
     empresa_libro = ""
     if "stores" in nombre_libro.lower():
@@ -614,8 +652,9 @@ def generar_archivo_salida(
     equiv_activos = [
         m for m in equiv_list
         if m["concepto"] and (
+            not empresa_libro or                                         # sin empresa detectada: aceptar todo
             m["empresa"].lower() in ("ambas", "ambas empresas", "") or
-            (empresa_libro and empresa_libro.lower() in m["empresa"].lower())
+            empresa_libro.lower() in m["empresa"].lower()
         )
     ]
 
@@ -679,8 +718,9 @@ def generar_archivo_salida(
             else:
                 monto = 0
                 for lc in libro_cols:
-                    if lc in df_libro.columns:
-                        monto += safe_num(libro_row.get(lc, 0))
+                    col_real = lc if lc in df_libro.columns else _col_norm_idx.get(_norm_col(lc))
+                    if col_real:
+                        monto += safe_num(libro_row.get(col_real, 0))
 
             # Omitir si monto = 0 (excepto conceptos resumen que siempre van)
             CONCEPTOS_SIEMPRE = {"totalesEmpl", "impuesto"}
@@ -969,6 +1009,11 @@ if st.button("▶ Generar archivo de importación Rex+"):
             st.stop()
         n_emp_libro = df_libro[col_rut_lb].notna().sum()
         st.markdown(f'<div class="alert-success">✅ Libro leído: <b>{n_emp_libro}</b> empleados, <b>{len(df_libro.columns)}</b> columnas.</div>', unsafe_allow_html=True)
+        with st.expander("🔍 Diagnóstico: columnas detectadas en el Libro"):
+            st.write("**Columna RUT detectada:**", col_rut_lb)
+            st.write("**Primeras 5 filas del Libro:**")
+            st.dataframe(df_libro.head(5))
+            st.write("**Columnas:**", list(df_libro.columns))
 
         # Parsear PDF
         pdf_dict = {}
