@@ -60,7 +60,7 @@ html, body, [class*="css"] { font-family: 'Inter', sans-serif; }
 <div class="section-title">Herramientas disponibles</div>
 """, unsafe_allow_html=True)
 
-col1, col2 = st.columns(2, gap="large")
+col1, col2, col3 = st.columns(3, gap="large")
 
 with col1:
     st.markdown("""
@@ -94,6 +94,22 @@ with col2:
     </div>
     """, unsafe_allow_html=True)
     st.page_link("pages/2_LRE_Detalle.py", label="Abrir herramienta →", use_container_width=True)
+
+with col3:
+    st.markdown("""
+    <div class="tool-card">
+        <div class="tool-icon">📥</div>
+        <div class="tool-title">3 · Libro Remuneraciones → Rex+</div>
+        <div class="tool-desc">
+            Procesa el Libro de Remuneraciones Excel junto con las liquidaciones
+            PDF y genera el archivo de importación detalle listo para cargar en Rex+.
+        </div>
+        <span class="tag">ACTIVA</span>
+        <span class="tag">PDF</span>
+        <span class="tag">Importación</span>
+    </div>
+    """, unsafe_allow_html=True)
+    st.page_link("pages/3_Libro_Rex.py", label="Abrir herramienta →", use_container_width=True)
 
 st.divider()
 st.caption("Rex+ Tools · Visma · Uso interno")
