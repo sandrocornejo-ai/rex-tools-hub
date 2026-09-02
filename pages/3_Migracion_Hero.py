@@ -700,7 +700,13 @@ def lookup_contrato_por_rut_inicio(rut_display, fecha_ingreso_ddmmaaaa, df_emple
     col_rut = next((c for c in df_empleados.columns if c.strip().lower() == "rut"), None)
     col_fin = next((c for c in df_empleados.columns
                     if "fecha" in c.strip().lower() and "inicio" in c.strip().lower()), None)
-    col_con = next((c for c in df_empleados.columns if "contrato" in c.strip().lower()), None)
+    # Buscar columna "Contrato" exacta primero, luego parcial excluyendo "Fecha Inicio contrato"
+    col_con = next((c for c in df_empleados.columns if c.strip().lower() == "contrato"), None)
+    if not col_con:
+        col_con = next((c for c in df_empleados.columns
+                        if "contrato" in c.strip().lower()
+                        and "fecha" not in c.strip().lower()
+                        and "inicio" not in c.strip().lower()), None)
     if not col_rut or not col_fin or not col_con:
         return ""
 
@@ -1113,9 +1119,12 @@ def generar_archivo_salida(
                     )
 
             # ── Rentas no gravadas ──
+            # = Remuneración No Imponible del libro de remuneraciones
             rentas_no_gravadas = 0
-            if concepto in GRUPO_AFECTO_IMPUESTO:
-                rentas_no_gravadas = pdf_emp.get("total_exentos_pdf", 0)
+            if _col_no_imponible:
+                rentas_no_gravadas = safe_num(libro_row.get(_col_no_imponible, 0))
+            elif _cols_rebaja_llss:
+                rentas_no_gravadas = sum(safe_num(libro_row.get(c, 0)) for c in _cols_rebaja_llss)
 
             # ── Parcial 7 ──
             parcial7 = calcular_parcial7(concepto, pdf_emp, params, pdf_emp_hist=pdf_emp_hist)
@@ -1349,7 +1358,15 @@ with col_fases:
 # ── BOTÓN PROCESAR ──
 st.markdown('<hr class="rex-divider">', unsafe_allow_html=True)
 
-if st.button("▶ Generar archivo de importación Rex+"):
+_listo = bool(archivo_libro and mes_proceso and not refs_equiv.empty)
+if not _listo:
+    _faltante = []
+    if not archivo_libro:       _faltante.append("Libro de Remuneraciones")
+    if not mes_proceso:         _faltante.append("Mes de proceso")
+    if refs_equiv.empty:        _faltante.append("Equivalencias")
+    st.caption(f"⚠️ Falta: {', '.join(_faltante)}")
+
+if st.button("▶ Generar archivo de importación Rex+", disabled=not _listo):
     if not archivo_libro:
         st.markdown('<div class="alert-error">❌ Debes subir el Libro de Remuneraciones.</div>', unsafe_allow_html=True)
         st.stop()
