@@ -717,7 +717,7 @@ def lookup_contrato_por_rut_inicio(rut_display, fecha_ingreso_ddmmaaaa, df_emple
         if hasattr(fi_val, "strftime"):
             fi_str = fi_val.strftime("%d-%m-%Y")
         else:
-            fi_str = str(fi_val).strip()
+            fi_str = str(fi_val).strip().split(" ")[0]  # recorta " 00:00:00" de fechas Excel
             for fmt in ("%d/%m/%Y", "%Y-%m-%d", "%d-%m-%Y"):
                 try:
                     fi_str = _dt.strptime(fi_str, fmt).strftime("%d-%m-%Y")
