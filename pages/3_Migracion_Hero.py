@@ -914,6 +914,22 @@ def generar_archivo_salida(
             if key2 not in _col_norm_idx:
                 _col_norm_idx[key2] = c
 
+    # Columnas del libro para rebajas LLSS (concepto impuesto)
+    # Busca una columna por cada código/keyword; guarda la primera que encuentre
+    _REBAJA_LLSS_KWS = [
+        ["1006", "apv regimen b", "apv-b", "apvb"],   # APV Régimen B
+        ["1523", "seg cesantia", "cesantia"],           # Seguro Cesantía
+        ["1524", "fonasa"],                             # Cotización FONASA
+        ["1520", "isapre"],                             # Cotización ISAPRE
+    ]
+    _cols_rebaja_llss = []
+    for _kws in _REBAJA_LLSS_KWS:
+        for _col in df_libro.columns:
+            _col_l = _col.lower()
+            if any(kw in _col_l for kw in _kws):
+                _cols_rebaja_llss.append(_col)
+                break  # una columna por grupo
+
     # Filtrar equivalencias válidas para esta empresa (según nombre archivo)
     empresa_libro = ""
     if "stores" in nombre_libro.lower():
@@ -1079,7 +1095,10 @@ def generar_archivo_salida(
             # ── Total rebajas LLSS ──
             total_rebajas_llss = 0
             if concepto in GRUPO_AFECTO_IMPUESTO:
-                total_rebajas_llss = pdf_emp.get("rebaja_llss_pdf", 0)
+                # Suma desde libro: 1006 APV-B + 1524 FONASA + 1520 ISAPRE + 1523 Seg.Ces.
+                total_rebajas_llss = sum(
+                    safe_num(libro_row.get(c, 0)) for c in _cols_rebaja_llss
+                )
 
             # ── Rentas no gravadas ──
             rentas_no_gravadas = 0
