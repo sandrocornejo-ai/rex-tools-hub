@@ -25,12 +25,13 @@ ARCHIVO_EQUIV   = os.path.join(DATA_DIR, "equivalencias_libro_rex.xlsx")
 ARCHIVO_EMPRESAS = os.path.join(DATA_DIR, "listado_empresas.xlsx")
 ARCHIVO_AFP      = os.path.join(DATA_DIR, "inst_afp.xlsx")
 ARCHIVO_SALUD    = os.path.join(DATA_DIR, "inst_salud.xlsx")
-ARCHIVO_MUTUALES = os.path.join(DATA_DIR, "inst_mutuales.xlsx")
+ARCHIVO_MUTUALES    = os.path.join(DATA_DIR, "inst_mutuales.xlsx")
+ARCHIVO_COT_AFP_HIST= os.path.join(DATA_DIR, "cot_afp_hist.xlsx")
 
 USA_FASES = False   # Cambiar a True si la empresa usa Fases en Rex+
 
 st.set_page_config(
-    page_title="Rex+ | Libro → Importación detalle",
+    page_title="Rex+ | Migración Hero",
     page_icon="📥",
     layout="wide"
 )
@@ -123,12 +124,13 @@ GRUPO_AFP_INST   = {"afp", "aporteAFPemp", "afpAhor", "voluntarioCoti", "volunta
                     "reliquidaAfp", "reliquidaAporteAFP", "trabajoPesa", "trabajoPesaEmpl",
                     "reliquidaTrabEmpl", "reliquidaTrabPesa", "sis", "reliquidaSis"}
 GRUPO_ISAPRE_INST= {"isapre", "reliquidaIsapre"}
-GRUPO_MUTUAL_INST= {"mutual", "reliquidaMutual", "aporteFAPPCEV", "reliquidaAporteCEV"}
+GRUPO_MUTUAL_INST= {"mutual", "reliquidaMutual"}
 GRUPO_CES_INST   = {"cesEmpleado", "cesAporteSol", "cesAporteCi",
                     "reliquidaCesEmpl", "reliquidaCesSol", "reliquidaCesCi"}
 
 # Conceptos con Cotización de jubilación (tasa AFP)
 GRUPO_COT_JUBILACION = {"afp", "reliquidaAfp"}
+
 
 # Parcial 7: solo para mutual/sis cuando hay licencia
 GRUPO_PARCIAL7 = {"mutual", "sis", "reliquidaMutual", "reliquidaSis"}
@@ -350,11 +352,41 @@ def cargar_inst_mutuales():
             id_m   = str(row.get("id_mutual", "") or "").strip()
             if nombre and id_m:
                 mapping[nombre] = id_m
-                # variantes cortas
-                for prefix in ("asociacion chilena de seguridad", "mutual de seguridad", "instituto de seguridad del trabajo"):
-                    if nombre.startswith(prefix):
-                        mapping[prefix] = id_m
+                mapping[id_m]   = id_m  # el id se mapea a sí mismo
+                # Alias por prefijos conocidos
+                PREFIJOS = (
+                    "asociacion chilena de seguridad", "achs",
+                    "mutual de seguridad", "mutseg",
+                    "instituto de seguridad del trabajo", "ist",
+                    "sin mutual", "isl",
+                )
+                for alias in PREFIJOS:
+                    if nombre.startswith(alias) or alias.startswith(nombre[:6]):
+                        mapping[alias] = id_m
+                # Alias adicionales según id
+                _extra = {
+                    "achs":   ["achs", "asociacion chilena", "a.c.h.s"],
+                    "ist":    ["ist", "instituto de seguridad"],
+                    "mutseg": ["mutual de seguridad", "mutual cchc", "mutseg"],
+                    "isl":    ["isl", "sin mutual", "empresa aporta", "no tiene mutual"],
+                }
+                for aliases in _extra.get(id_m, []):
+                    mapping[aliases] = id_m
         return mapping
+    except Exception:
+        return {}
+
+@st.cache_data
+def cargar_cot_afp_hist():
+    """dict {id_afp_hist_lower: cot_hist_afp}. Clave = mes+id, ej: '2026-05provida'."""
+    try:
+        df = pd.read_excel(ARCHIVO_COT_AFP_HIST, dtype=str)
+        return {
+            str(r.get("id_afp_hist","") or "").strip().lower():
+            str(r.get("cot_hist_afp","") or "").strip()
+            for _, r in df.iterrows()
+            if str(r.get("id_afp_hist","") or "").strip()
+        }
     except Exception:
         return {}
 
@@ -362,11 +394,15 @@ def nombre_a_id_mutual(nombre_pdf, inst_mutuales_dict):
     if not nombre_pdf:
         return ""
     key = nombre_pdf.strip().lower()
+    # 1. Si ya es un id válido (ej. "mutseg"), retornar directo
+    if key in inst_mutuales_dict.values():
+        return key
+    # 2. Coincidencia exacta de clave
     if key in inst_mutuales_dict:
         return inst_mutuales_dict[key]
-    # búsqueda parcial
+    # 3. Búsqueda parcial en ambas direcciones
     for k, v in inst_mutuales_dict.items():
-        if k and k in key:
+        if k and (k in key or key in k):
             return v
     return nombre_pdf.lower()
 
@@ -699,6 +735,24 @@ def get_mutual_nombre(rut_norm, df_empleados, df_empresas):
         return str(df_empresas.iloc[0].get(col_mutual, "Mutual de Seguridad"))
     return "Mutual de Seguridad"
 
+def lookup_cotizacion_mutual(emp_nombre, df_empresas):
+    """Trae 'Cotización Mutual' de la empresa desde listado_empresas."""
+    if df_empresas is None or df_empresas.empty:
+        return ""
+    col_emp = next((c for c in df_empresas.columns if "empresa" in c.lower()), None)
+    col_cot = next((c for c in df_empresas.columns
+                    if "cot" in c.lower() and "mutual" in c.lower()), None)
+    if not col_cot:
+        mutuales_cols = [c for c in df_empresas.columns if "mutual" in c.lower()]
+        col_cot = mutuales_cols[1] if len(mutuales_cols) > 1 else None
+    if not col_emp or not col_cot:
+        return ""
+    norm_q = _norm_str(emp_nombre)
+    for _, row in df_empresas.iterrows():
+        if norm_q and norm_q in _norm_str(str(row.get(col_emp, ""))):
+            return str(safe_num(row.get(col_cot, 0)))
+    return str(safe_num(df_empresas.iloc[0].get(col_cot, 0))) if len(df_empresas) >= 1 else ""
+
 # ─────────────────────────────────────────────
 # CÁLCULO DE AFECTO
 # ─────────────────────────────────────────────
@@ -797,6 +851,7 @@ def generar_archivo_salida(
     inst_afp_dict     = cargar_inst_afp()
     inst_salud_dict   = cargar_inst_salud()
     inst_mutuales_dict= cargar_inst_mutuales()
+    cot_afp_hist_dict = cargar_cot_afp_hist()
 
     equiv_activos = [
         m for m in equiv_list
@@ -902,10 +957,28 @@ def generar_archivo_salida(
             elif concepto in GRUPO_MUTUAL_INST:
                 id_inst = nombre_a_id_mutual(mutual_nombre, inst_mutuales_dict)
 
-            # ── Cotización jubilación ──
+            # ── Cotización de Jubilación ──
             cot_jubilacion = ""
-            if concepto in GRUPO_COT_JUBILACION:
-                cot_jubilacion = pdf_emp.get("afp_tasa", "")
+            if concepto == "afp":
+                # Tasa histórica AFP desde cot_afp_hist (mes+id_afp)
+                _id_afp_cj = nombre_a_id_afp(
+                    pdf_emp.get("afp_nombre",""), inst_afp_dict).lower()
+                cot_jubilacion = cot_afp_hist_dict.get(
+                    f"{fecha_proceso}{_id_afp_cj}", "")
+            elif concepto == "mutual":
+                cot_jubilacion = lookup_cotizacion_mutual(emp_nombre, df_empresas)
+            elif concepto == "sis":
+                cot_jubilacion = str(safe_num(params.get("sis", 0)))
+            elif concepto == "totalesEmpl":
+                cot_jubilacion = str(suma_afectos)
+            elif concepto == "aporteAFPemp":
+                cot_jubilacion = str(safe_num(params.get("Aporte AFP", 0)))
+            elif concepto == "aporteFAPPCEV":
+                cot_jubilacion = str(safe_num(params.get("Seg Social Exp vida", 0)))
+            elif concepto in GRUPO_ISAPRE_INST:
+                cot_jubilacion = str(monto)
+            elif concepto == "cesEmpleado":
+                cot_jubilacion = "0.6"
 
             # ── Total rebajas LLSS ──
             total_rebajas_llss = 0
@@ -1238,7 +1311,12 @@ if st.button("▶ Generar archivo de importación Rex+"):
                 df_empleados.columns = [str(c).strip() for c in df_empleados.columns]
 
         if archivo_empresas:
-            df_empresas = pd.read_excel(archivo_empresas, header=1)
+            # Auto-detect: si la primera fila parece un título (no contiene "empresa"),
+            # usar header=1; en caso contrario header=0
+            _raw_emp = pd.read_excel(archivo_empresas, header=None, nrows=2, dtype=str)
+            _row0 = [str(v).strip().lower() for v in _raw_emp.iloc[0] if str(v).strip().lower() != "nan"]
+            _hdr = 1 if not any("empresa" in v for v in _row0) else 0
+            df_empresas = pd.read_excel(archivo_empresas, header=_hdr)
             df_empresas.columns = [str(c).strip() for c in df_empresas.columns]
 
         if archivo_params_up:

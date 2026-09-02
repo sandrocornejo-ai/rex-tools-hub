@@ -99,7 +99,7 @@ with col3:
     st.markdown("""
     <div class="tool-card">
         <div class="tool-icon">📥</div>
-        <div class="tool-title">3 · Libro Remuneraciones → Rex+</div>
+        <div class="tool-title">3 · Migración Hero → Rex+</div>
         <div class="tool-desc">
             Procesa el Libro de Remuneraciones Excel junto con las liquidaciones
             PDF y genera el archivo de importación detalle listo para cargar en Rex+.
@@ -109,7 +109,7 @@ with col3:
         <span class="tag">Importación</span>
     </div>
     """, unsafe_allow_html=True)
-    st.page_link("pages/3_Libro_Rex.py", label="Abrir herramienta →", use_container_width=True)
+    st.page_link("pages/3_Migracion_Hero.py", label="Abrir herramienta →", use_container_width=True)
 
 st.divider()
 st.caption("Rex+ Tools · Visma · Uso interno")
