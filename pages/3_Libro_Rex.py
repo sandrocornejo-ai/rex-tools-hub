@@ -207,7 +207,10 @@ def get_params_mes(df_params, mes_proc):
     if fila.empty:
         fila = df_params
     f = fila.iloc[0]
-    return {k: (float(f[k]) if pd.notna(f.get(k, None)) else 0) for k in df_params.columns if k != "mes_Proc"}
+    def _sf(v):
+        try: return float(v)
+        except: return 0
+    return {k: (_sf(f[k]) if pd.notna(f.get(k, None)) else 0) for k in df_params.columns if k != "mes_Proc"}
 
 def build_equiv_list(df_equiv):
     """Construye lista de mappings activos (con Concepto Rex+ no vacío)."""
