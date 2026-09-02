@@ -635,10 +635,18 @@ def get_emp_sin_licencia(rut_norm, pdf_dict_historico):
 # CARGA Y DETECCIÓN DEL LIBRO
 # ─────────────────────────────────────────────
 def cargar_libro(xlsx_bytes):
-    """Carga el Libro de Remuneraciones. Auto-detecta fila de encabezados."""
+    """Carga el Libro de Remuneraciones. Auto-detecta fila de encabezados.
+    Retorna (df, rut_empresa_libro) donde rut_empresa_libro se extrae de la fila 0."""
     # 1ra pasada: leer sin header para buscar la fila que contiene "RUT"
     raw = pd.read_excel(io.BytesIO(xlsx_bytes), header=None, dtype=str)
     header_row = 0
+    # Extraer RUT empresa de fila 0
+    rut_empresa_libro = ""
+    if not raw.empty:
+        fila0 = " ".join([str(v) for v in raw.iloc[0].values if pd.notna(v)])
+        m_rut0 = re.search(r"(\d{7,8}-[\dkK])", fila0)
+        if m_rut0:
+            rut_empresa_libro = m_rut0.group(1)
     for i, row in raw.iterrows():
         vals = [str(v).strip().upper() for v in row.values if pd.notna(v)]
         if any("RUT" in v for v in vals):
@@ -658,7 +666,7 @@ def cargar_libro(xlsx_bytes):
                 df[col] = converted
         except Exception:
             pass
-    return df
+    return df, rut_empresa_libro
 
 
 def inferir_mes_desde_nombre(nombre_archivo):
@@ -898,7 +906,8 @@ def obtener_rut_libro(df_libro):
 def generar_archivo_salida(
     df_libro, pdf_dict, df_empleados, df_empresas, df_params,
     equiv_list, fecha_proceso, nombre_libro, usa_fases=False,
-    pdf_dict_historico=None
+    pdf_dict_historico=None,
+    rut_empresa_libro=""
 ):
     """ETL principal: Libro + PDF + maestros → DataFrame de salida Rex+."""
     params = get_params_mes(df_params, fecha_proceso)
@@ -956,6 +965,8 @@ def generar_archivo_salida(
     inst_salud_dict   = cargar_inst_salud()
     inst_mutuales_dict= cargar_inst_mutuales()
     cot_afp_hist_dict = cargar_cot_afp_hist()
+    # Empresa global desde RUT fila 0 del libro
+    empresa_code_global = lookup_empresa_por_rut(rut_empresa_libro, df_empresas) if rut_empresa_libro else ""
 
     equiv_activos = [
         m for m in equiv_list
@@ -984,9 +995,11 @@ def generar_archivo_salida(
         if not contrato:
             contrato = lookup_contrato(rut_norm, mes_proceso, df_empleados)
 
-        # Empresa Rex+: primero por RUT empresa del PDF → Identificador nacional
-        _rut_empresa = pdf_emp.get("rut_empresa", "")
-        empresa_code = lookup_empresa_por_rut(_rut_empresa, df_empresas)
+        # Empresa Rex+: primero desde RUT fila 0 del libro, luego PDF, luego nombre empleado
+        empresa_code = empresa_code_global
+        if not empresa_code:
+            _rut_empresa = pdf_emp.get("rut_empresa", "")
+            empresa_code = lookup_empresa_por_rut(_rut_empresa, df_empresas)
         if not empresa_code:
             emp_nombre   = lookup_empresa_empleado(rut_norm, df_empleados)
             empresa_code = lookup_empresa_rex(emp_nombre, df_empresas)
@@ -1380,7 +1393,7 @@ if st.button("▶ Generar archivo de importación Rex+", disabled=not _listo):
     with st.spinner("Procesando..."):
 
         # Cargar Libro
-        df_libro = cargar_libro(archivo_libro.read())
+        df_libro, rut_empresa_libro = cargar_libro(archivo_libro.read())
         col_rut_lb = obtener_rut_libro(df_libro)
         if not col_rut_lb:
             st.markdown('<div class="alert-error">❌ No se encontró columna RUT en el Libro.</div>', unsafe_allow_html=True)
@@ -1480,7 +1493,8 @@ if st.button("▶ Generar archivo de importación Rex+", disabled=not _listo):
         df_salida, warnings_etl = generar_archivo_salida(
             df_libro, pdf_dict, df_empleados, df_empresas, df_params,
             equiv_list, mes_proceso, archivo_libro.name, usa_fases=usa_fases_ui,
-            pdf_dict_historico=pdf_dict_historico
+            pdf_dict_historico=pdf_dict_historico,
+            rut_empresa_libro=rut_empresa_libro
         )
 
         if warnings_etl:
