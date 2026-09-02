@@ -347,6 +347,18 @@ def parsear_pagina_pdf(text):
     emp["rebaja_llss_pdf"]   = _rebaja
     emp["total_exentos_pdf"] = _exentos
 
+    # Período de la liquidación (Ej: "Período: Junio 2026" o "06/2026")
+    emp["periodo_pdf"] = ""
+    for pat in [
+        r"[Pp]er[ií]odo[\s:Remuneraciones]+([A-Za-záéíóúÁÉÍÓÚ]+\s+\d{4})",
+        r"[Pp]er[ií]odo[\s:]+(\d{2}/\d{4})",
+        r"Liquidación\s+de\s+(?:Remuneraciones\s+)?([A-Za-záéíóú]+\s+\d{4})",
+    ]:
+        m_p = re.search(pat, text)
+        if m_p:
+            emp["periodo_pdf"] = m_p.group(1).strip()
+            break
+
     return emp
 
 
@@ -389,6 +401,25 @@ def parsear_multiples_pdfs_historicos(pdf_files_list):
                 hist[rut] = []
             hist[rut].append(emp)
     return hist
+
+MESES_ES = {
+    "enero":1,"febrero":2,"marzo":3,"abril":4,"mayo":5,"junio":6,
+    "julio":7,"agosto":8,"septiembre":9,"octubre":10,"noviembre":11,"diciembre":12
+}
+
+def periodo_pdf_a_aaaamm(periodo_str):
+    """Convierte 'Junio 2026' o '06/2026' a '2026-06'. Retorna None si no puede."""""
+    if not periodo_str:
+        return None
+    m = re.match(r"(\d{2})/(\d{4})", periodo_str.strip())
+    if m:
+        return f"{m.group(2)}-{m.group(1)}"
+    m = re.match(r"([A-Za-záéíóúÁÉÍÓÚ]+)\s+(\d{4})", periodo_str.strip())
+    if m:
+        num = MESES_ES.get(m.group(1).lower())
+        if num:
+            return f"{m.group(2)}-{num:02d}"
+    return None
 
 def get_emp_sin_licencia(rut_norm, pdf_dict_historico):
     """Busca en el historial el primer mes sin licencia del empleado."""
@@ -950,6 +981,19 @@ if st.button("▶ Generar archivo de importación Rex+"):
                 if pdf_errors:
                     st.markdown(f'<div class="alert-warning">⚠️ {len(pdf_errors)} página(s) con error en PDF.</div>', unsafe_allow_html=True)
                 st.markdown(f'<div class="alert-success">✅ PDF parseado: <b>{len(pdf_dict)}</b> empleados encontrados.</div>', unsafe_allow_html=True)
+                # Validar período del PDF vs mes_proceso
+                if pdf_dict:
+                    primer_emp = next(iter(pdf_dict.values()))
+                    periodo_raw = primer_emp.get("periodo_pdf", "")
+                    periodo_std = periodo_pdf_a_aaaamm(periodo_raw)
+                    if periodo_std and periodo_std != mes_proceso.strip():
+                        st.markdown(
+                            f'<div class="alert-error">❌ <b>Período del PDF ({periodo_raw} → {periodo_std})</b> no coincide con el mes de proceso ingresado (<b>{mes_proceso}</b>). Verifica que estás subiendo las liquidaciones del mes correcto.</div>',
+                            unsafe_allow_html=True
+                        )
+                        st.stop()
+                    elif periodo_std:
+                        st.markdown(f'<div class="alert-success">✅ Período del PDF: <b>{periodo_raw}</b> ✔</div>', unsafe_allow_html=True)
 
             # Parsear PDFs históricos
         pdf_dict_historico = None
