@@ -958,27 +958,45 @@ def generar_archivo_salida(
                 id_inst = nombre_a_id_mutual(mutual_nombre, inst_mutuales_dict)
 
             # ── Cotización de Jubilación ──
+            def _fmt_cot(v, entero=False):
+                """Formatea valor para col. Cotización de Jubilación.
+                Separador decimal: coma. entero=True → sin decimales."""
+                if v == "" or v is None:
+                    return ""
+                try:
+                    f = float(str(v).replace(",", "."))
+                    if entero:
+                        return str(int(round(f)))
+                    s = f"{f:.10f}".rstrip("0").rstrip(".")
+                    return s.replace(".", ",")
+                except Exception:
+                    return str(v)
+
             cot_jubilacion = ""
             if concepto == "afp":
-                # Tasa histórica AFP desde cot_afp_hist (mes+id_afp)
+                # Tasa histórica AFP: dict guarda valor %, se divide /100
                 _id_afp_cj = nombre_a_id_afp(
                     pdf_emp.get("afp_nombre",""), inst_afp_dict).lower()
-                cot_jubilacion = cot_afp_hist_dict.get(
-                    f"{fecha_proceso}{_id_afp_cj}", "")
+                _raw_afp = cot_afp_hist_dict.get(f"{fecha_proceso}{_id_afp_cj}", "")
+                if _raw_afp:
+                    try:
+                        cot_jubilacion = _fmt_cot(float(_raw_afp) / 100)
+                    except Exception:
+                        cot_jubilacion = _raw_afp
             elif concepto == "mutual":
-                cot_jubilacion = lookup_cotizacion_mutual(emp_nombre, df_empresas)
+                cot_jubilacion = _fmt_cot(lookup_cotizacion_mutual(emp_nombre, df_empresas))
             elif concepto == "sis":
-                cot_jubilacion = str(safe_num(params.get("sis", 0)))
+                cot_jubilacion = _fmt_cot(safe_num(params.get("sis", 0)))
             elif concepto == "totalesEmpl":
-                cot_jubilacion = str(suma_afectos)
+                cot_jubilacion = str(int(round(suma_afectos))) if suma_afectos else ""
             elif concepto == "aporteAFPemp":
-                cot_jubilacion = str(safe_num(params.get("Aporte AFP", 0)))
+                cot_jubilacion = _fmt_cot(safe_num(params.get("Aporte AFP", 0)))
             elif concepto == "aporteFAPPCEV":
-                cot_jubilacion = str(safe_num(params.get("Seg Social Exp vida", 0)))
+                cot_jubilacion = _fmt_cot(safe_num(params.get("Seg Social Exp vida", 0)))
             elif concepto in GRUPO_ISAPRE_INST:
-                cot_jubilacion = str(monto)
+                cot_jubilacion = _fmt_cot(monto, entero=True)
             elif concepto == "cesEmpleado":
-                cot_jubilacion = "0.6"
+                cot_jubilacion = "0,6"
 
             # ── Total rebajas LLSS ──
             total_rebajas_llss = 0
