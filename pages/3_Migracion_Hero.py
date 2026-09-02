@@ -415,11 +415,16 @@ def parsear_pagina_pdf(text):
     emp = {}
     lines = text.split("\n")
 
-    # RUT
+    # RUT empleado (con puntos: "10.540.597-9")
     rut_raw = _match(r"RUT[\s:]+(\d{1,2}[\.\s]?\d{3}[\.\s]?\d{3}[\s]?-[\s]?[\dkK])", text)
     if rut_raw:
         emp["rut_display"] = rut_raw.replace(" ", "")
         emp["rut"] = normalizar_rut(rut_raw)
+
+    # RUT empresa (sin puntos, sin espacio: "Rut:76211425-9")
+    rut_emp_m = re.search(r"Rut:(\d{7,8}-[\dkK])", text)
+    if rut_emp_m:
+        emp["rut_empresa"] = rut_emp_m.group(1).strip()
 
     # Fecha ingreso TALANA: "Fecha de Ingreso: 31 de Agosto de 2020"
     fi_m = re.search(
@@ -736,6 +741,25 @@ def lookup_contrato(rut_norm, fecha_proceso, df_empleados):
         return ""
     return str(fila.iloc[0][col_con])
 
+def lookup_empresa_por_rut(rut_empresa, df_empresas):
+    """Busca empresa en listado_empresas por columna 'Identificador nacional' (RUT empresa).
+    Retorna el valor de la columna 'Empresa'."""
+    if df_empresas is None or df_empresas.empty or not rut_empresa:
+        return ""
+    col_id  = next((c for c in df_empresas.columns
+                    if "identificador" in c.lower() and "nacional" in c.lower()), None)
+    col_emp = next((c for c in df_empresas.columns
+                    if c.strip().lower() == "empresa"), None)
+    if not col_id or not col_emp:
+        return ""
+    rut_q = re.sub(r"\.", "", str(rut_empresa)).strip().upper()
+    for _, row in df_empresas.iterrows():
+        rut_row = re.sub(r"\.", "", str(row.get(col_id, "") or "")).strip().upper()
+        if rut_q == rut_row:
+            return str(row.get(col_emp, "")).strip()
+    return ""
+
+
 def lookup_empresa_rex(empresa_nombre, df_empresas):
     """Dado el nombre de la empresa, retorna el código Empresa de Rex+ desde listado_empresas."""
     if df_empresas is None or df_empresas.empty:
@@ -929,9 +953,13 @@ def generar_archivo_salida(
         if not contrato:
             contrato = lookup_contrato(rut_norm, mes_proceso, df_empleados)
 
-        # Empresa Rex+
+        # Empresa Rex+: primero por RUT empresa del PDF → Identificador nacional
+        _rut_empresa = pdf_emp.get("rut_empresa", "")
+        empresa_code = lookup_empresa_por_rut(_rut_empresa, df_empresas)
+        if not empresa_code:
+            emp_nombre   = lookup_empresa_empleado(rut_norm, df_empleados)
+            empresa_code = lookup_empresa_rex(emp_nombre, df_empresas)
         emp_nombre   = lookup_empresa_empleado(rut_norm, df_empleados)
-        empresa_code = lookup_empresa_rex(emp_nombre, df_empresas)
         mutual_nombre= get_mutual_nombre(rut_norm, df_empleados, df_empresas)
 
         # Días
