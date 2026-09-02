@@ -186,7 +186,8 @@ def safe_col_sum(row, columns):
 def cargar_equivalencias():
     if not os.path.exists(ARCHIVO_EQUIV):
         return pd.DataFrame()
-    df = pd.read_excel(ARCHIVO_EQUIV)
+    # header=2: las 2 primeras filas son título/subtítulo; los encabezados reales están en la fila 3
+    df = pd.read_excel(ARCHIVO_EQUIV, header=2)
     df.columns = [str(c).strip() for c in df.columns]
     return df
 
