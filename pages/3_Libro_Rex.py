@@ -1002,17 +1002,22 @@ if st.button("▶ Generar archivo de importación Rex+"):
                 pdf_dict_historico = parsear_multiples_pdfs_historicos(archivos_pdf_hist)
                 st.markdown(f'<div class="alert-success">✅ Historial: <b>{len(pdf_dict_historico)}</b> empleados con datos históricos.</div>', unsafe_allow_html=True)
 
-        # Cruzar RUTs entre Libro y PDF
+
+        else:
+            st.markdown('<div class="alert-warning">⚠️ Sin PDF: Afecto, Id institución, días trab/lic y jornada no estarán disponibles.</div>', unsafe_allow_html=True)
+
+        # Cruzar RUTs entre Libro y PDF (fuera del bloque histórico)
+        if pdf_dict:
             ruts_libro = set(df_libro[col_rut_lb].dropna().apply(lambda x: normalizar_rut(str(x))))
             ruts_pdf   = set(pdf_dict.keys())
             sin_pdf    = ruts_libro - ruts_pdf
             if sin_pdf:
+                ruts_lista = ", ".join(sorted(sin_pdf))
                 st.markdown(
-                    f'<div class="alert-warning">⚠️ <b>{len(sin_pdf)}</b> empleados del Libro sin liquidación PDF '
-                    f'(días trab/lic y AFP se dejarán en 0 para ellos).</div>', unsafe_allow_html=True
+                    f'<div class="alert-warning">⚠️ <b>{len(sin_pdf)}</b> empleado(s) del Libro sin liquidación PDF '
+                    f'(días trab/lic y AFP quedarán en 0):<br><small>{ruts_lista}</small></div>',
+                    unsafe_allow_html=True
                 )
-        else:
-            st.markdown('<div class="alert-warning">⚠️ Sin PDF: Afecto, Id institución, días trab/lic y jornada no estarán disponibles.</div>', unsafe_allow_html=True)
 
         # Cargar maestros
         df_empleados = None
