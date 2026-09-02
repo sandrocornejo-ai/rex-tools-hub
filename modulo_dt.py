@@ -1195,6 +1195,8 @@ def generar_excel_dt(df_salida):
         cell.alignment = Alignment(horizontal="center", vertical="center")
         ws.column_dimensions[cell.column_letter].width = max(len(col) + 4, 14)
 
+    col_cot_jub_idx = next((i+1 for i, c in enumerate(cols) if c == "Cotización de jubilación"), None)
+
     for ri, row in enumerate(df_salida.itertuples(index=False), 2):
         fill = PatternFill("solid", fgColor="EAF0F8") if ri % 2 == 0 else PatternFill("solid", fgColor="FFFFFF")
         for ci, val in enumerate(row, 1):
@@ -1202,6 +1204,8 @@ def generar_excel_dt(df_salida):
             cell.fill = fill
             cell.border = border
             cell.alignment = Alignment(vertical="center")
+            if col_cot_jub_idx and ci == col_cot_jub_idx and isinstance(val, (int, float)):
+                cell.number_format = "0.00"
 
     ws.freeze_panes = "A2"
     wb.save(output)
