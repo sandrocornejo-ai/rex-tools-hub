@@ -373,6 +373,28 @@ def parsear_pdf_bytes(pdf_bytes):
 
     return result, errores
 
+def parsear_multiples_pdfs_historicos(pdf_files_list):
+    """Parsea múltiples PDFs históricos. Retorna {rut_norm: [emp_data, ...]}."""
+    hist = {}
+    for f in pdf_files_list:
+        pdf_dict, _ = parsear_pdf_bytes(f.read())
+        if not pdf_dict:
+            continue
+        for rut, emp in pdf_dict.items():
+            if rut not in hist:
+                hist[rut] = []
+            hist[rut].append(emp)
+    return hist
+
+def get_emp_sin_licencia(rut_norm, pdf_dict_historico):
+    """Busca en el historial el primer mes sin licencia del empleado."""
+    if not pdf_dict_historico or rut_norm not in pdf_dict_historico:
+        return None
+    for emp in pdf_dict_historico[rut_norm]:
+        if emp.get("dias_licencia", 0) == 0:
+            return emp
+    return None
+
 # ─────────────────────────────────────────────
 # CARGA Y DETECCIÓN DEL LIBRO
 # ─────────────────────────────────────────────
@@ -479,7 +501,7 @@ def get_mutual_nombre(rut_norm, df_empleados, df_empresas):
 # ─────────────────────────────────────────────
 # CÁLCULO DE AFECTO
 # ─────────────────────────────────────────────
-def calcular_afecto(concepto, pdf_emp, suma_afectos_libro, params, cesEmpleado_afecto):
+def calcular_afecto(concepto, pdf_emp, suma_afectos_libro, params, cesEmpleado_afecto, pdf_emp_hist=None):
     """Calcula el campo Afecto según el concepto."""
     if concepto in GRUPO_AFECTO_AFP:
         return pdf_emp.get("renta_imponible_afp", 0)
@@ -495,17 +517,20 @@ def calcular_afecto(concepto, pdf_emp, suma_afectos_libro, params, cesEmpleado_a
         if dias_lic == 0:
             return cesEmpleado_afecto
         else:
-            # Caso licencia > 0: requiere PDF histórico (Phase 2)
-            # Por ahora retornamos cesEmpleado como aproximación
+            if pdf_emp_hist:
+                renta_hist = pdf_emp_hist.get("renta_imponible_afp", 0)
+                tope_ces = params.get("topeCes_pesos", 0)
+                return min(renta_hist, tope_ces) if tope_ces else renta_hist
             return cesEmpleado_afecto
     return 0
 
-def calcular_parcial7(concepto, pdf_emp, params, pdf_dict_historico=None):
-    """Parcial 7: tope imponible AFP si hay licencia, para mutual/sis."""
+def calcular_parcial7(concepto, pdf_emp, params, pdf_emp_hist=None):
+    """Parcial 7: renta imponible del mes sin licencia (o tope fallback), para mutual/sis."""
     if concepto not in GRUPO_PARCIAL7:
         return 0
     if pdf_emp.get("dias_licencia", 0) > 0:
-        # Buscar PDF histórico con dias_licencia = 0 (Phase 2: usar params como fallback)
+        if pdf_emp_hist:
+            return pdf_emp_hist.get("renta_imponible_afp", 0)
         return params.get("topeImp_pesos_afp", 0)
     return 0
 
@@ -532,7 +557,8 @@ def obtener_rut_libro(df_libro):
 
 def generar_archivo_salida(
     df_libro, pdf_dict, df_empleados, df_empresas, df_params,
-    equiv_list, fecha_proceso, nombre_libro, usa_fases=False
+    equiv_list, fecha_proceso, nombre_libro, usa_fases=False,
+    pdf_dict_historico=None
 ):
     """ETL principal: Libro + PDF + maestros → DataFrame de salida Rex+."""
     params = get_params_mes(df_params, fecha_proceso)
@@ -567,9 +593,10 @@ def generar_archivo_salida(
         if not rut_norm or rut_norm.lower() in ("nan", ""):
             continue
 
-        rut_fmt   = formatear_rut(rut_norm)
-        pdf_emp   = pdf_dict.get(rut_norm, {})
-        contrato  = lookup_contrato(rut_norm, pdf_emp.get("fecha_ingreso", ""), df_empleados)
+        rut_fmt      = formatear_rut(rut_norm)
+        pdf_emp      = pdf_dict.get(rut_norm, {})
+        pdf_emp_hist = get_emp_sin_licencia(rut_norm, pdf_dict_historico)
+        contrato     = lookup_contrato(rut_norm, pdf_emp.get("fecha_ingreso", ""), df_empleados)
 
         # Empresa Rex+
         emp_nombre   = lookup_empresa_empleado(rut_norm, df_empleados)
@@ -626,7 +653,7 @@ def generar_archivo_salida(
                 continue
 
             # ── Afecto ──
-            afecto = calcular_afecto(concepto, pdf_emp, suma_afectos, params, cesEmp_afecto)
+            afecto = calcular_afecto(concepto, pdf_emp, suma_afectos, params, cesEmp_afecto, pdf_emp_hist=pdf_emp_hist)
 
             # ── Id de institución ──
             id_inst = ""
@@ -655,7 +682,7 @@ def generar_archivo_salida(
                 rentas_no_gravadas = pdf_emp.get("total_exentos_pdf", 0)
 
             # ── Parcial 7 ──
-            parcial7 = calcular_parcial7(concepto, pdf_emp, params)
+            parcial7 = calcular_parcial7(concepto, pdf_emp, params, pdf_emp_hist=pdf_emp_hist)
 
             # ── Parcial 8 ──
             parcial8 = calcular_parcial8(concepto, cesEmp_afecto)
@@ -809,14 +836,25 @@ with col_a:
         mes_inferido = inferir_mes_desde_nombre(archivo_libro.name)
         st.markdown(f'<div class="alert-success">✅ Libro cargado: <b>{archivo_libro.name}</b></div>', unsafe_allow_html=True)
 
-    st.markdown("#### 📋 PDF de Liquidaciones")
+    st.markdown("#### 📋 PDF de Liquidaciones (mes a procesar)")
     archivo_pdf = st.file_uploader(
-        "Sube el PDF de liquidaciones TALANA",
+        "Sube el PDF de liquidaciones TALANA del mes a procesar",
         type=["pdf"], key="up_pdf",
-        help="PDF con las liquidaciones de sueldo del mismo período. Una página = un empleado."
+        help="PDF con las liquidaciones de sueldo del período actual. Una página = un empleado."
     )
     if archivo_pdf:
         st.markdown(f'<div class="alert-success">✅ PDF cargado: <b>{archivo_pdf.name}</b></div>', unsafe_allow_html=True)
+
+    st.markdown("#### 📚 PDFs históricos (meses anteriores)")
+    archivos_pdf_hist = st.file_uploader(
+        "Sube los PDFs de todos los meses anteriores",
+        type=["pdf"], accept_multiple_files=True, key="up_pdfs_hist",
+        help="Usados para calcular renta imponible real de empleados con licencia."
+    )
+    if archivos_pdf_hist:
+        st.markdown(f'<div class="alert-success">✅ {len(archivos_pdf_hist)} PDF(s) histórico(s) cargados.</div>', unsafe_allow_html=True)
+    else:
+        st.markdown('<div class="alert-info">ℹ️ Sin PDFs históricos: empleados con licencia usarán el tope AFP como aproximación.</div>', unsafe_allow_html=True)
 
 with col_b:
     st.markdown("#### 👥 Listado de Empleados")
@@ -909,7 +947,14 @@ if st.button("▶ Generar archivo de importación Rex+"):
                     st.markdown(f'<div class="alert-warning">⚠️ {len(pdf_errors)} página(s) con error en PDF.</div>', unsafe_allow_html=True)
                 st.markdown(f'<div class="alert-success">✅ PDF parseado: <b>{len(pdf_dict)}</b> empleados encontrados.</div>', unsafe_allow_html=True)
 
-            # Cruzar RUTs entre Libro y PDF
+            # Parsear PDFs históricos
+        pdf_dict_historico = None
+        if archivos_pdf_hist:
+            with st.spinner(f"Parseando {len(archivos_pdf_hist)} PDF(s) histórico(s)..."):
+                pdf_dict_historico = parsear_multiples_pdfs_historicos(archivos_pdf_hist)
+                st.markdown(f'<div class="alert-success">✅ Historial: <b>{len(pdf_dict_historico)}</b> empleados con datos históricos.</div>', unsafe_allow_html=True)
+
+        # Cruzar RUTs entre Libro y PDF
             ruts_libro = set(df_libro[col_rut_lb].dropna().apply(lambda x: normalizar_rut(str(x))))
             ruts_pdf   = set(pdf_dict.keys())
             sin_pdf    = ruts_libro - ruts_pdf
@@ -950,7 +995,8 @@ if st.button("▶ Generar archivo de importación Rex+"):
         # Generar archivo de salida
         df_salida, warnings_etl = generar_archivo_salida(
             df_libro, pdf_dict, df_empleados, df_empresas, df_params,
-            equiv_list, mes_proceso, archivo_libro.name, usa_fases=usa_fases_ui
+            equiv_list, mes_proceso, archivo_libro.name, usa_fases=usa_fases_ui,
+            pdf_dict_historico=pdf_dict_historico
         )
 
         if warnings_etl:
