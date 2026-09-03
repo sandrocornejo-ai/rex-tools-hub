@@ -1068,6 +1068,13 @@ def generar_archivo_salida(
                     col_real = lc if lc in df_libro.columns else _col_norm_idx.get(_norm_col(lc))
                     if col_real:
                         monto += safe_num(libro_row.get(col_real, 0))
+                # Fallback impuesto: buscar 2ª ocurrencia 'Impuestos' o '1527 IMPUESTO UNICO'
+                if concepto in GRUPO_AFECTO_IMPUESTO and monto == 0:
+                    for _try_col in ["1527 IMPUESTO UNICO", "Impuestos.1", "Impuestos"]:
+                        if _try_col in df_libro.columns:
+                            monto = safe_num(libro_row.get(_try_col, 0))
+                            if monto:
+                                break
 
             # Omitir si monto = 0 (excepto conceptos resumen que siempre van)
             CONCEPTOS_SIEMPRE = {"totalesEmpl", "impuesto"}
