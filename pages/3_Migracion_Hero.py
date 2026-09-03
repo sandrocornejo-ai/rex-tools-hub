@@ -1120,7 +1120,10 @@ def generar_archivo_salida(
                     pdf_emp.get("afp_nombre",""), inst_afp_dict).lower()
                 _raw_afp = cot_afp_hist_dict.get(f"{fecha_proceso}{_id_afp_cj}", "")
                 if _raw_afp:
-                    cot_jubilacion = _fmt_cot(_raw_afp)
+                    try:
+                        cot_jubilacion = _fmt_cot(float(str(_raw_afp).replace(',', '.')) * 100)
+                    except Exception:
+                        cot_jubilacion = _fmt_cot(_raw_afp)
             elif concepto == "mutual":
                 cot_jubilacion = _fmt_cot(lookup_cotizacion_mutual(emp_nombre, df_empresas))
             elif concepto == "sis":
