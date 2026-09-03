@@ -1123,15 +1123,20 @@ def generar_archivo_salida(
                 cot_jubilacion = "0,6"
 
             # ── Total rebajas LLSS ──
+            # Solo para impuesto: suma columnas descuentos legales del libro
             total_rebajas_llss = 0
             if concepto in GRUPO_AFECTO_IMPUESTO:
-                # Suma haberes exentos del libro
-                if _col_no_imponible:
-                    total_rebajas_llss = safe_num(libro_row.get(_col_no_imponible, 0))
-                else:
-                    total_rebajas_llss = sum(
-                        safe_num(libro_row.get(c, 0)) for c in _cols_rebaja_llss
-                    )
+                _COLS_REBAJA_LLSS_FIJAS = [
+                    "1006 APV REGIMEN B",
+                    "1524 COTIZACION FONASA",
+                    "Isapre",
+                    "Isapre sobre 7%",
+                    "1523 SEGURO CESANTIA",
+                ]
+                for _c in _COLS_REBAJA_LLSS_FIJAS:
+                    col_real = _c if _c in df_libro.columns else _col_norm_idx.get(_norm_col(_c))
+                    if col_real:
+                        total_rebajas_llss += safe_num(libro_row.get(col_real, 0))
 
             # ── Rentas no gravadas ──
             # Solo aplica para concepto impuesto; resto = 0
