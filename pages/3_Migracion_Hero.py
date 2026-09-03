@@ -1026,12 +1026,16 @@ def generar_archivo_salida(
         # Jornada: horas_base > 30 → "C", sino "P"
         jornada   = "C" if horas_base > 30 else "P"
 
-        # Monto Init = (sueldo_base / dias_trab) * 30
-        sueldo_base_pdf = pdf_emp.get("sueldo_base", 0)
-        if dias_trab and dias_trab > 0 and sueldo_base_pdf:
-            monto_init = round((sueldo_base_pdf / dias_trab) * 30)
+        # Monto Init: solo para sueldoBase = SueldoBase_libro / DiasLicencia_libro * 30
+        # Detectar columna Sueldo Base del libro
+        _col_sueldo_base_lb = next(
+            (c for c in df_libro.columns if re.search(r"sueldo\s*base", c, re.IGNORECASE)), None
+        )
+        _sueldo_base_libro = safe_num(libro_row.get(_col_sueldo_base_lb, 0)) if _col_sueldo_base_lb else 0
+        if _sueldo_base_libro and dias_lic and dias_lic > 0:
+            monto_init = round(_sueldo_base_libro / dias_lic * 30)
         else:
-            monto_init = sueldo_base_pdf
+            monto_init = _sueldo_base_libro
 
         # Suma haberes afectos del Libro (para Afecto de totalesEmpl y cesEmpleado)
         # Buscar columna totales en el libro o suma por secciones
@@ -1142,7 +1146,17 @@ def generar_archivo_salida(
             elif concepto == "sis":
                 cot_jubilacion = _fmt_cot(safe_num(params.get("sis", 0)))
             elif concepto == "totalesEmpl":
-                cot_jubilacion = str(int(round(suma_afectos))) if suma_afectos else ""
+                # Remuneración Total - Remuneración Imponible del libro
+                _col_rem_total = next(
+                    (c for c in df_libro.columns if re.search(r"remuneraci[oó]n\s+total", c, re.IGNORECASE)), None
+                )
+                _col_rem_impon = next(
+                    (c for c in df_libro.columns if re.search(r"remuneraci[oó]n\s+imponible", c, re.IGNORECASE)), None
+                )
+                _rem_total = safe_num(libro_row.get(_col_rem_total, 0)) if _col_rem_total else 0
+                _rem_impon = safe_num(libro_row.get(_col_rem_impon, 0)) if _col_rem_impon else 0
+                _cot_tot = int(round(_rem_total - _rem_impon))
+                cot_jubilacion = str(_cot_tot) if _cot_tot else ""
             elif concepto == "aporteAFPemp":
                 cot_jubilacion = _fmt_cot(safe_num(params.get("Aporte AFP", 0)))
             elif concepto == "aporteFAPPCEV":
@@ -1187,7 +1201,7 @@ def generar_archivo_salida(
             fila = {
                 "Fecha de proceso":         fecha_proceso,
                 "Id empleado":              rut_fmt,
-                "Número de contrato":       contrato,
+                "Número de contrato":       1,
                 "Id del concepto":          concepto,
                 "Monto del concepto":       int(round(monto)) if monto else 0,
                 "Afecto":                   int(round(afecto)) if afecto else 0,
@@ -1202,7 +1216,7 @@ def generar_archivo_salida(
                 "Rebaja por zona extrema":  0,
                 "Jornada":                  jornada,
                 "Días de vacaciones":       0,
-                "Monto Init":               int(round(monto_init)) if monto_init else 0,
+                "Monto Init":               (int(round(monto_init)) if monto_init else 0) if concepto == "sueldoBase" else 0,
                 "Parcial 7":                int(round(parcial7)) if parcial7 else 0,
                 "Parcial 8":                int(round(parcial8)) if parcial8 else 0,
             }
