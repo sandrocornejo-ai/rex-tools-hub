@@ -865,12 +865,48 @@ def calcular_afecto(concepto, pdf_emp, suma_afectos_libro, params, cesEmpleado_a
             return cesEmpleado_afecto
     return 0
 
-def calcular_parcial7(concepto, params, dias_licencia=0, pdf_emp_hist=None):
-    """Parcial 7: renta imponible del mes sin licencia (o tope fallback), para mutual/sis.
-    dias_licencia se toma del libro Excel (columna Días Licencia)."""
+@st.cache_data(show_spinner=False)
+def cargar_consolidado_ecom(xlsx_bytes: bytes) -> dict:
+    """Carga Consolidado_HeroEcom.xlsx y devuelve dict {(mes_proceso, rut): ult_imp_sin_lic}.
+    Ignora filas donde 'Ult Imp sin Lic' sea nulo o la cadena 'No disponible'."""
+    try:
+        df = pd.read_excel(io.BytesIO(xlsx_bytes))
+        df.columns = [str(c).strip() for c in df.columns]
+        # Detectar columnas clave de forma flexible
+        col_mes = next((c for c in df.columns if "mes" in c.lower() and "proceso" in c.lower()), None)
+        col_rut = next((c for c in df.columns if c.lower() == "rut" or ("rut" in c.lower() and "empresa" not in c.lower())), None)
+        col_uil = next((c for c in df.columns if "ult" in c.lower() and "imp" in c.lower()), None)
+        if not (col_mes and col_rut and col_uil):
+            return {}
+        lookup = {}
+        for _, row in df.iterrows():
+            mes  = str(row[col_mes]).strip() if pd.notna(row[col_mes]) else ""
+            rut  = normalizar_rut(str(row[col_rut])) if pd.notna(row[col_rut]) else ""
+            val  = row[col_uil]
+            if not mes or not rut:
+                continue
+            if pd.isna(val) or str(val).strip().lower() == "no disponible":
+                continue
+            lookup[(mes, rut)] = int(round(float(val)))
+        return lookup
+    except Exception:
+        return {}
+
+
+def calcular_parcial7(concepto, params, dias_licencia=0, pdf_emp_hist=None,
+                      consolidado_lookup=None, mes_proceso="", rut_norm=""):
+    """Parcial 7: renta imponible del mes sin licencia para mutual/sis.
+    Si dias_licencia > 0 busca en Consolidado_HeroEcom por (mes_proceso, rut).
+    Fallback: pdf_emp_hist → tope AFP del mes."""
     if concepto not in GRUPO_PARCIAL7:
         return 0
     if dias_licencia > 0:
+        # Primero: lookup en Consolidado_HeroEcom
+        if consolidado_lookup and mes_proceso and rut_norm:
+            val = consolidado_lookup.get((mes_proceso, rut_norm))
+            if val is not None:
+                return val
+        # Segundo: datos históricos del PDF
         if pdf_emp_hist:
             renta_hist = pdf_emp_hist.get("renta_imponible_afp", 0)
             if renta_hist:
@@ -910,7 +946,8 @@ def generar_archivo_salida(
     df_libro, pdf_dict, df_empleados, df_empresas, df_params,
     equiv_list, fecha_proceso, nombre_libro, usa_fases=False,
     pdf_dict_historico=None,
-    rut_empresa_libro=""
+    rut_empresa_libro="",
+    consolidado_ecom_lookup=None,
 ):
     """ETL principal: Libro + PDF + maestros → DataFrame de salida Rex+."""
     params = get_params_mes(df_params, fecha_proceso)
@@ -1192,7 +1229,11 @@ def generar_archivo_salida(
                     rentas_no_gravadas = sum(safe_num(libro_row.get(c, 0)) for c in _cols_rebaja_llss)
 
             # ── Parcial 7 ──
-            parcial7 = calcular_parcial7(concepto, params, dias_licencia=dias_lic, pdf_emp_hist=pdf_emp_hist)
+            parcial7 = calcular_parcial7(
+                concepto, params, dias_licencia=dias_lic, pdf_emp_hist=pdf_emp_hist,
+                consolidado_lookup=consolidado_ecom_lookup,
+                mes_proceso=fecha_proceso, rut_norm=rut_norm,
+            )
 
             # ── Parcial 8 ──
             parcial8 = calcular_parcial8(concepto, cesEmp_afecto)
@@ -1210,7 +1251,7 @@ def generar_archivo_salida(
                 "Días de licencias":        dias_lic,
                 "Días trabajados":          dias_trab,
                 "Fecha de aplicación":      fecha_proceso,
-                "Empresa":                  empresa_code,
+                "Empresa":                  "762114259",
                 "Total de rebajas por LLSS": int(round(total_rebajas_llss)) if total_rebajas_llss else 0,
                 "Rentas no gravadas":       int(round(rentas_no_gravadas)) if rentas_no_gravadas else 0,
                 "Rebaja por zona extrema":  0,
@@ -1402,6 +1443,16 @@ with col_b:
     else:
         st.markdown('<div class="alert-error">❌ No hay parámetros disponibles.</div>', unsafe_allow_html=True)
 
+    st.markdown("#### 📋 Consolidado HeroEcom (Parcial 7)")
+    archivo_consolidado_ecom = st.file_uploader(
+        "Sube Consolidado_HeroEcom.xlsx (opcional)",
+        type=["xlsx"], key="up_consolidado_ecom",
+        help="Requerido para calcular Parcial 7 en mutual/sis cuando el empleado tiene días de licencia. "
+             "Columnas necesarias: 'Mes de Proceso', 'Rut', 'Ult Imp sin Lic'."
+    )
+    if archivo_consolidado_ecom:
+        st.markdown('<div class="alert-success">✅ Consolidado HeroEcom cargado.</div>', unsafe_allow_html=True)
+
 # ── PERÍODO ──
 st.markdown('<hr class="rex-divider">', unsafe_allow_html=True)
 col_mes, col_fases, _ = st.columns([2, 2, 4])
@@ -1541,12 +1592,23 @@ if st.button("▶ Generar archivo de importación Rex+", disabled=not _listo):
             st.markdown('<div class="alert-error">❌ No se pudieron leer las equivalencias. Verifica el formato del archivo.</div>', unsafe_allow_html=True)
             st.stop()
 
+        # Cargar Consolidado HeroEcom para Parcial 7
+        consolidado_ecom_lookup = None
+        if archivo_consolidado_ecom:
+            consolidado_ecom_lookup = cargar_consolidado_ecom(archivo_consolidado_ecom.read())
+            n_lookup = len(consolidado_ecom_lookup)
+            if n_lookup:
+                st.markdown(f'<div class="alert-success">✅ Consolidado HeroEcom: <b>{n_lookup}</b> registros con "Ult Imp sin Lic" disponibles.</div>', unsafe_allow_html=True)
+            else:
+                st.markdown('<div class="alert-warning">⚠️ Consolidado HeroEcom cargado pero no se encontraron registros válidos para Parcial 7.</div>', unsafe_allow_html=True)
+
         # Generar archivo de salida
         df_salida, warnings_etl = generar_archivo_salida(
             df_libro, pdf_dict, df_empleados, df_empresas, df_params,
             equiv_list, mes_proceso, archivo_libro.name, usa_fases=usa_fases_ui,
             pdf_dict_historico=pdf_dict_historico,
-            rut_empresa_libro=rut_empresa_libro
+            rut_empresa_libro=rut_empresa_libro,
+            consolidado_ecom_lookup=consolidado_ecom_lookup,
         )
 
         if warnings_etl:
