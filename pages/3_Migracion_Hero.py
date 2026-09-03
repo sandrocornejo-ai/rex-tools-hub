@@ -1043,8 +1043,10 @@ def generar_archivo_salida(
         for mapping in equiv_activos:
             concepto  = mapping["concepto"]
             libro_cols= mapping["libro_cols"]
-            # Deduplicar conceptos que usan COLS fijas (isapre)
-            if concepto in GRUPO_ISAPRE_INST:
+            # Deduplicar conceptos que usan COLS fijas (isapre, impuesto)
+            # Para impuesto: usar solo la primera mapping (1527 IMPUESTO UNICO),
+            # ignorar filas adicionales como 1529 IMPUESTO UNICO FINIQUITO
+            if concepto in GRUPO_ISAPRE_INST or concepto == "impuesto":
                 if concepto in _conceptos_ya_vistos:
                     continue
                 _conceptos_ya_vistos.add(concepto)
