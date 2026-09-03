@@ -872,7 +872,10 @@ def calcular_parcial7(concepto, params, dias_licencia=0, pdf_emp_hist=None):
         return 0
     if dias_licencia > 0:
         if pdf_emp_hist:
-            return pdf_emp_hist.get("renta_imponible_afp", 0)
+            renta_hist = pdf_emp_hist.get("renta_imponible_afp", 0)
+            if renta_hist:
+                return renta_hist
+        # Fallback: tope AFP del mes
         return params.get("topeImp_pesos_afp", 0)
     return 0
 
