@@ -852,8 +852,7 @@ def calcular_afecto(concepto, pdf_emp, suma_afectos_libro, params, cesEmpleado_a
     if concepto in GRUPO_AFECTO_TOTALES:
         return suma_afectos_libro
     if concepto in GRUPO_AFECTO_CES:
-        tope_ces = params.get("topeCes_pesos", 0)
-        return min(suma_afectos_libro, tope_ces) if tope_ces else suma_afectos_libro
+        return cesEmpleado_afecto  # base CES derivada de 1523 SEGURO CESANTIA / 0.6%
     if concepto in GRUPO_AFECTO_SIS:
         dias_lic = pdf_emp.get("dias_licencia", 0)
         if dias_lic == 0:
@@ -1033,8 +1032,16 @@ def generar_archivo_salida(
         if col_total_afectos:
             suma_afectos = safe_num(libro_row.get(col_total_afectos, 0))
 
-        # cesEmpleado afecto
-        cesEmp_afecto = min(suma_afectos, tope_ces) if tope_ces else suma_afectos
+        # cesEmpleado afecto: base CES = 1523 SEGURO CESANTIA / 0.6%
+        # (tope CES es distinto y mayor al tope AFP usado en suma_afectos)
+        _col_ces_empl = next(
+            (c for c in df_libro.columns if "1523" in c and "cesantia" in c.lower()), None
+        )
+        _ces_empl_monto = safe_num(libro_row.get(_col_ces_empl, 0)) if _col_ces_empl else 0
+        if _ces_empl_monto > 0:
+            cesEmp_afecto = round(_ces_empl_monto / 0.006)
+        else:
+            cesEmp_afecto = min(suma_afectos, tope_ces) if tope_ces else suma_afectos
 
         # Calcular Parcial 8 base (necesita cesEmp_afecto)
         # Lo calculamos por empleado y lo reutilizamos
