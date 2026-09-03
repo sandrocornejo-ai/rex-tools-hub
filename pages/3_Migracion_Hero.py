@@ -865,11 +865,12 @@ def calcular_afecto(concepto, pdf_emp, suma_afectos_libro, params, cesEmpleado_a
             return cesEmpleado_afecto
     return 0
 
-def calcular_parcial7(concepto, pdf_emp, params, pdf_emp_hist=None):
-    """Parcial 7: renta imponible del mes sin licencia (o tope fallback), para mutual/sis."""
+def calcular_parcial7(concepto, params, dias_licencia=0, pdf_emp_hist=None):
+    """Parcial 7: renta imponible del mes sin licencia (o tope fallback), para mutual/sis.
+    dias_licencia se toma del libro Excel (columna Días Licencia)."""
     if concepto not in GRUPO_PARCIAL7:
         return 0
-    if pdf_emp.get("dias_licencia", 0) > 0:
+    if dias_licencia > 0:
         if pdf_emp_hist:
             return pdf_emp_hist.get("renta_imponible_afp", 0)
         return params.get("topeImp_pesos_afp", 0)
@@ -1005,10 +1006,19 @@ def generar_archivo_salida(
         emp_nombre   = lookup_empresa_empleado(rut_norm, df_empleados)
         mutual_nombre= get_mutual_nombre(rut_norm, df_empleados, df_empresas)
 
-        # Días
+        # Días — leer desde el libro Excel; fallback al PDF
         dias_trab = pdf_emp.get("dias_trabajados", 0)
-        dias_lic  = pdf_emp.get("dias_licencia", 0)
         horas_base= pdf_emp.get("horas_base", 0)
+        # Columna "Días Licencia" del libro (búsqueda flexible)
+        _col_dias_lic = next(
+            (c for c in df_libro.columns
+             if re.search(r"d[ií]as?\s+licencia", c, re.IGNORECASE)),
+            None
+        )
+        if _col_dias_lic:
+            dias_lic = int(safe_num(libro_row.get(_col_dias_lic, 0)))
+        else:
+            dias_lic = pdf_emp.get("dias_licencia", 0)
 
         # Jornada: horas_base > 30 → "C", sino "P"
         jornada   = "C" if horas_base > 30 else "P"
@@ -1165,7 +1175,7 @@ def generar_archivo_salida(
                     rentas_no_gravadas = sum(safe_num(libro_row.get(c, 0)) for c in _cols_rebaja_llss)
 
             # ── Parcial 7 ──
-            parcial7 = calcular_parcial7(concepto, pdf_emp, params, pdf_emp_hist=pdf_emp_hist)
+            parcial7 = calcular_parcial7(concepto, params, dias_licencia=dias_lic, pdf_emp_hist=pdf_emp_hist)
 
             # ── Parcial 8 ──
             parcial8 = calcular_parcial8(concepto, cesEmp_afecto)
