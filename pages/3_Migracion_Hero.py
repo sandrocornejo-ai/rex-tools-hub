@@ -1134,12 +1134,13 @@ def generar_archivo_salida(
                     )
 
             # ── Rentas no gravadas ──
-            # = Remuneración No Imponible del libro de remuneraciones
+            # Solo aplica para concepto impuesto; resto = 0
             rentas_no_gravadas = 0
-            if _col_no_imponible:
-                rentas_no_gravadas = safe_num(libro_row.get(_col_no_imponible, 0))
-            elif _cols_rebaja_llss:
-                rentas_no_gravadas = sum(safe_num(libro_row.get(c, 0)) for c in _cols_rebaja_llss)
+            if concepto in GRUPO_AFECTO_IMPUESTO:
+                if _col_no_imponible:
+                    rentas_no_gravadas = safe_num(libro_row.get(_col_no_imponible, 0))
+                elif _cols_rebaja_llss:
+                    rentas_no_gravadas = sum(safe_num(libro_row.get(c, 0)) for c in _cols_rebaja_llss)
 
             # ── Parcial 7 ──
             parcial7 = calcular_parcial7(concepto, pdf_emp, params, pdf_emp_hist=pdf_emp_hist)
