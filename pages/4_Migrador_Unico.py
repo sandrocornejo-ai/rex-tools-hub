@@ -94,7 +94,8 @@ if "mu_resultados"   not in st.session_state: st.session_state.mu_resultados   =
 if "mu_df_rex"       not in st.session_state: st.session_state.mu_df_rex       = None
 if "mu_conceptos"    not in st.session_state: st.session_state.mu_conceptos    = None
 if "mu_asignaciones" not in st.session_state: st.session_state.mu_asignaciones = {}
-if "mu_eliminados"   not in st.session_state: st.session_state.mu_eliminados   = set()
+if "mu_eliminados"      not in st.session_state: st.session_state.mu_eliminados      = set()
+if "mu_match_overrides" not in st.session_state: st.session_state.mu_match_overrides = {}
 
 # ─────────────────────────────────────────────
 # PASO 1 — CARGA DE ARCHIVOS
@@ -203,39 +204,93 @@ if st.session_state.mu_resultados is not None:
     # ── MATCHES AUTOMÁTICOS ──────────────────────────────────────────────────
     with tab_match:
         if res["match"]:
+            match_overrides = st.session_state.mu_match_overrides
+            eliminados      = st.session_state.mu_eliminados
+
             st.markdown(
-                '<div class="section-sub">Marca la casilla <b>🗑️ Eliminar</b> en las filas duplicadas y presiona el botón para quitarlas.</div>',
+                '<div class="section-sub">'
+                'Puedes cambiar la asignación de cualquier concepto usando el selector de la derecha. '
+                'Marca la casilla <b>Eliminar</b> para quitar filas duplicadas y presiona el botón.</div>',
                 unsafe_allow_html=True,
             )
-            df_m = pd.DataFrame([
-                {
-                    "Eliminar":          False,
-                    "Concepto cliente":  m["col_cliente"],
-                    "Codigo Rex+":       m["concepto_rex"],
-                    "Nombre Rex+":       m["nombre_rex"],
-                    "Tipo":              m["tipo_rex"],
-                    "Score":             m["score"],
-                    "Metodo":            m["metodo"],
-                }
-                for m in res["match"]
-            ])
-            edited_df = st.data_editor(
-                df_m,
-                use_container_width=True,
-                hide_index=True,
-                column_config={
-                    "Eliminar": st.column_config.CheckboxColumn("Eliminar", width="small"),
-                    "Score":    st.column_config.NumberColumn(format="%.0f%%"),
-                },
-                disabled=["Concepto cliente", "Codigo Rex+", "Nombre Rex+", "Tipo", "Score", "Metodo"],
-            )
-            a_eliminar = edited_df[edited_df["Eliminar"]]["Concepto cliente"].tolist()
-            if a_eliminar:
-                if st.button(f"Eliminar {len(a_eliminar)} fila(s) marcada(s)"):
+            st.markdown("")
+
+            # Encabezados
+            h1, h2, h3 = st.columns([2, 3, 1])
+            h1.markdown("**Concepto del cliente**")
+            h2.markdown("**Concepto Rex+ asignado**")
+            h3.markdown("**Eliminar**")
+            st.markdown('<hr style="margin:4px 0 12px 0">', unsafe_allow_html=True)
+
+            opciones_rex_m = ["— Sin asignar —"] + [
+                f"{row['Concepto']} | {row['Nombre']} ({row['Tipo']})"
+                for _, row in df_rex.iterrows()
+            ]
+
+            for m in res["match"]:
+                col_cli = m["col_cliente"]
+                # Usar override si existe, sino el match original
+                override = match_overrides.get(col_cli)
+                actual_concepto = override["concepto_rex"] if override else m["concepto_rex"]
+                actual_nombre   = override["nombre_rex"]   if override else m["nombre_rex"]
+                actual_tipo     = override["tipo_rex"]      if override else m["tipo_rex"]
+
+                c_left, c_mid, c_right = st.columns([2, 3, 1])
+
+                with c_left:
+                    score_col = "#38a169" if m["score"] >= 90 else "#d69e2e"
+                    st.markdown(
+                        f'<div style="padding:6px 0 10px 0">'
+                        f'<div style="font-weight:600;color:#1a2744;font-size:14px;">{col_cli}</div>'
+                        f'<div style="font-size:12px;color:#6b7a9a;margin-top:2px;">'
+                        f'Score: <span style="color:{score_col};font-weight:700;">{m["score"]:.0f}%</span>'
+                        f' · {m["metodo"]}</div></div>',
+                        unsafe_allow_html=True,
+                    )
+
+                with c_mid:
+                    best_plain = f"{actual_concepto} | {actual_nombre} ({actual_tipo})"
+                    default_idx = opciones_rex_m.index(best_plain) if best_plain in opciones_rex_m else 0
+                    sel = st.selectbox(
+                        f"match_{col_cli}",
+                        opciones_rex_m,
+                        index=default_idx,
+                        key=f"mu_match_sel_{col_cli}",
+                        label_visibility="collapsed",
+                    )
+                    if sel != "— Sin asignar —":
+                        codigo = sel.split(" | ")[0]
+                        fila   = df_rex[df_rex["Concepto"] == codigo].iloc[0]
+                        match_overrides[col_cli] = {
+                            "concepto_rex": fila["Concepto"],
+                            "nombre_rex":   fila["Nombre"],
+                            "tipo_rex":     fila["Tipo"],
+                        }
+                    elif col_cli in match_overrides:
+                        del match_overrides[col_cli]
+
+                with c_right:
+                    eliminar = st.checkbox(
+                        "del",
+                        value=col_cli in eliminados,
+                        key=f"mu_del_{col_cli}",
+                        label_visibility="collapsed",
+                    )
+                    if eliminar:
+                        eliminados.add(col_cli)
+                    elif col_cli in eliminados:
+                        eliminados.discard(col_cli)
+
+                st.markdown('<hr style="margin:4px 0 8px 0;border-color:#e8edf5">', unsafe_allow_html=True)
+
+            if eliminados:
+                if st.button(f"Eliminar {len(eliminados)} fila(s) marcada(s)"):
                     st.session_state.mu_resultados["match"] = [
-                        m for m in res["match"]
-                        if m["col_cliente"] not in a_eliminar
+                        m for m in res["match"] if m["col_cliente"] not in eliminados
                     ]
+                    for k in list(eliminados):
+                        match_overrides.pop(k, None)
+                    st.session_state.mu_eliminados = set()
                     st.rerun()
         else:
             st.markdown('<div class="alert-warning">No se encontraron matches automáticos.</div>', unsafe_allow_html=True)
@@ -343,15 +398,17 @@ if st.session_state.mu_resultados is not None:
     # Construir tabla final
     filas = []
 
+    match_ov = st.session_state.get("mu_match_overrides", {})
     for m in res["match"]:
+        ov = match_ov.get(m["col_cliente"])
         filas.append({
-            "Concepto cliente":       m["col_cliente"],
-            "Archivos":               ", ".join(conceptos.get(m["col_cliente"], [])),
-            "Código Rex+":            m["concepto_rex"],
-            "Nombre Rex+":            m["nombre_rex"],
-            "Tipo Rex+":              m["tipo_rex"],
-            "Score":                  m["score"],
-            "Método":                 m["metodo"],
+            "Concepto cliente": m["col_cliente"],
+            "Archivos":         ", ".join(conceptos.get(m["col_cliente"], [])),
+            "Código Rex+":      ov["concepto_rex"] if ov else m["concepto_rex"],
+            "Nombre Rex+":      ov["nombre_rex"]   if ov else m["nombre_rex"],
+            "Tipo Rex+":        ov["tipo_rex"]      if ov else m["tipo_rex"],
+            "Score":            m["score"],
+            "Método":           ("Editado manualmente" if ov else m["metodo"]),
         })
 
     for d in res["dudoso"]:
