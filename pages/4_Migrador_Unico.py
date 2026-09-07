@@ -5,6 +5,19 @@ from io import BytesIO
 from lector import leer_multiples_libros
 from comparador import cargar_conceptos_rex, cruzar_conceptos
 
+# Orden de visualización por tipo de concepto
+_ORDEN_TIPO = {
+    'Haberes Afectos':    1,
+    'Haberes Exentos':    2,
+    'Descuentos Legales': 3,
+    'Otros Descuentos':   4,
+    'Aportes Patronales': 5,
+}
+def _orden_tipo(tipo: str) -> int:
+    return _ORDEN_TIPO.get(tipo, 99)
+
+
+
 # ─────────────────────────────────────────────
 # CONFIGURACIÓN DE PÁGINA
 # ─────────────────────────────────────────────
@@ -231,7 +244,7 @@ if st.session_state.mu_resultados is not None:
                 for _, row in df_rex.iterrows()
             ]
 
-            matches_visibles = [m for m in res["match"] if not busq_m or busq_m in m["col_cliente"].lower()]
+            matches_visibles = sorted([m for m in res["match"] if not busq_m or busq_m in m["col_cliente"].lower()], key=lambda m: _orden_tipo(m.get('tipo_rex', '')))
             for m in matches_visibles:
                 col_cli = m["col_cliente"]
                 # Usar override si existe, sino el match original
@@ -320,7 +333,7 @@ if st.session_state.mu_resultados is not None:
                 f"{row['Concepto']} | {row['Nombre']} ({row['Tipo']})"
                 for _, row in df_rex.iterrows()
             ]
-            for item in [x for x in res["dudoso"] if not busq_d or busq_d in x["col_cliente"].lower()]:
+            for item in sorted([x for x in res["dudoso"] if not busq_d or busq_d in x["col_cliente"].lower()], key=lambda x: _orden_tipo(x["sugerencias"][0]["tipo"] if x["sugerencias"] else "")):
                 col_cli = item["col_cliente"]
                 sugs    = item["sugerencias"]
                 mejor   = sugs[0] if sugs else None
@@ -377,7 +390,7 @@ if st.session_state.mu_resultados is not None:
                 for _, row in df_rex.iterrows()
             ]
 
-            for item in [x for x in res["sin_match"] if not busq_s or busq_s in x["col_cliente"].lower()]:
+            for item in sorted([x for x in res["sin_match"] if not busq_s or busq_s in x["col_cliente"].lower()], key=lambda x: x["col_cliente"]):
                 col_cli = item["col_cliente"]
                 with st.expander(f"❌ {col_cli}"):
                     sel = st.selectbox(
