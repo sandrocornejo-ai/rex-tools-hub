@@ -35,10 +35,21 @@ def normalizar(texto: str) -> str:
     return texto
 
 
+# Patrones que requieren word-boundary para evitar falsos positivos
+# (ej: 'empleado' no debe filtrar 'empleador')
+_PATRONES_WB = {'empleado', 'empresa'}
+
 def es_columna_meta(nombre_col: str) -> bool:
     """Detecta si una columna es metadata del trabajador (no concepto de remuneración)."""
     col_norm = normalizar(nombre_col)
-    return any(patron in col_norm for patron in PATRONES_META)
+    for patron in PATRONES_META:
+        if patron in _PATRONES_WB:
+            if re.search(r'\b' + re.escape(patron) + r'\b', col_norm):
+                return True
+        else:
+            if patron in col_norm:
+                return True
+    return False
 
 
 def detectar_fila_header(df_raw: pd.DataFrame) -> int:
