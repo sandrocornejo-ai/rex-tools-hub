@@ -111,6 +111,3 @@ with col3:
     """, unsafe_allow_html=True)
     st.page_link("pages/3_Migracion_Hero.py", label="Abrir herramienta →", use_container_width=True)
 
-st.divider()
-st.caption("Rex+ Tools · Visma · Uso interno")
-st.page_link("pages/4_Migrador_Unico.py", label="🔄 Migrador Único", icon="🔄")
