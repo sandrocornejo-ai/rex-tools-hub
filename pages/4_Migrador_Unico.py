@@ -93,6 +93,7 @@ st.markdown("""
 if "mu_resultados"   not in st.session_state: st.session_state.mu_resultados   = None
 if "mu_df_rex"       not in st.session_state: st.session_state.mu_df_rex       = None
 if "mu_conceptos"    not in st.session_state: st.session_state.mu_conceptos    = None
+if "mu_periodos"     not in st.session_state: st.session_state.mu_periodos     = None
 if "mu_asignaciones" not in st.session_state: st.session_state.mu_asignaciones = {}
 if "mu_eliminados"      not in st.session_state: st.session_state.mu_eliminados      = set()
 if "mu_match_overrides" not in st.session_state: st.session_state.mu_match_overrides = {}
@@ -150,7 +151,7 @@ if listo_para_procesar:
     if st.button("🔀 Cruzar conceptos"):
         with st.spinner("Leyendo libros y cruzando conceptos..."):
             # Leer libros
-            todos_conceptos, errores_lectura = leer_multiples_libros(libros)
+            todos_conceptos, todos_periodos, errores_lectura = leer_multiples_libros(libros)
             if errores_lectura:
                 for err in errores_lectura:
                     st.markdown(f'<div class="alert-error">⚠️ {err}</div>', unsafe_allow_html=True)
@@ -167,6 +168,7 @@ if listo_para_procesar:
             st.session_state.mu_resultados   = resultados
             st.session_state.mu_df_rex       = df_rex
             st.session_state.mu_conceptos    = todos_conceptos
+            st.session_state.mu_periodos     = todos_periodos
             st.session_state.mu_asignaciones = {}
             st.rerun()
 
@@ -177,6 +179,7 @@ if st.session_state.mu_resultados is not None:
     res       = st.session_state.mu_resultados
     df_rex    = st.session_state.mu_df_rex
     conceptos = st.session_state.mu_conceptos
+    periodos  = st.session_state.mu_periodos or {}
     asigs     = st.session_state.mu_asignaciones
 
     n_match    = len(res["match"])
@@ -206,6 +209,7 @@ if st.session_state.mu_resultados is not None:
         if res["match"]:
             match_overrides = st.session_state.mu_match_overrides
             eliminados      = st.session_state.mu_eliminados
+            busq_m = st.text_input("🔍 Buscar concepto", key="busq_match", placeholder="Escribe para filtrar...").strip().lower()
 
             st.markdown(
                 '<div class="section-sub">'
@@ -227,7 +231,8 @@ if st.session_state.mu_resultados is not None:
                 for _, row in df_rex.iterrows()
             ]
 
-            for m in res["match"]:
+            matches_visibles = [m for m in res["match"] if not busq_m or busq_m in m["col_cliente"].lower()]
+            for m in matches_visibles:
                 col_cli = m["col_cliente"]
                 # Usar override si existe, sino el match original
                 override = match_overrides.get(col_cli)
@@ -244,7 +249,9 @@ if st.session_state.mu_resultados is not None:
                         f'<div style="font-weight:600;color:#1a2744;font-size:14px;">{col_cli}</div>'
                         f'<div style="font-size:12px;color:#6b7a9a;margin-top:2px;">'
                         f'Score: <span style="color:{score_col};font-weight:700;">{m["score"]:.0f}%</span>'
-                        f' · {m["metodo"]}</div></div>',
+                        f' · {m["metodo"]}</div>'
+                        f'<div style="font-size:11px;color:#6b7a9a;">📅 {", ".join(periodos.get(col_cli, ["—"]))}</div>'
+                        f'</div>',
                         unsafe_allow_html=True,
                     )
 
@@ -298,6 +305,7 @@ if st.session_state.mu_resultados is not None:
     # ── DUDOSOS ──────────────────────────────────────────────────────────────
     with tab_dudoso:
         if res["dudoso"]:
+            busq_d = st.text_input("🔍 Buscar concepto", key="busq_dud", placeholder="Escribe para filtrar...").strip().lower()
             st.markdown(
                 '<div class="alert-warning">⚠️ El sistema no pudo confirmar estos conceptos. '
                 'Elige en la columna derecha el concepto Rex+ correcto para cada uno.</div>',
@@ -312,7 +320,7 @@ if st.session_state.mu_resultados is not None:
                 f"{row['Concepto']} | {row['Nombre']} ({row['Tipo']})"
                 for _, row in df_rex.iterrows()
             ]
-            for item in res["dudoso"]:
+            for item in [x for x in res["dudoso"] if not busq_d or busq_d in x["col_cliente"].lower()]:
                 col_cli = item["col_cliente"]
                 sugs    = item["sugerencias"]
                 mejor   = sugs[0] if sugs else None
@@ -324,7 +332,9 @@ if st.session_state.mu_resultados is not None:
                         f'<div style="padding:6px 0 10px 0">'
                         f'<div style="font-weight:600;color:#1a2744;font-size:14px;">{col_cli}</div>'
                         f'<div style="font-size:12px;color:#6b7a9a;margin-top:2px;">Mejor coincidencia: '
-                        f'<span style="color:{score_col};font-weight:700;">{score_txt}</span></div></div>',
+                        f'<span style="color:{score_col};font-weight:700;">{score_txt}</span></div>'
+                        f'<div style="font-size:11px;color:#6b7a9a;">📅 {", ".join(periodos.get(col_cli, ["—"]))}</div>'
+                        f'</div>',
                         unsafe_allow_html=True,
                     )
                 with c_right:
@@ -358,6 +368,7 @@ if st.session_state.mu_resultados is not None:
     # ── SIN MATCH ────────────────────────────────────────────────────────────
     with tab_sin:
         if res["sin_match"]:
+            busq_s = st.text_input("🔍 Buscar concepto", key="busq_sin", placeholder="Escribe para filtrar...").strip().lower()
             st.markdown('<div class="alert-error">❌ Estos conceptos no tienen equivalencia en Rex+. Puedes asignarlos manualmente.</div>', unsafe_allow_html=True)
             st.markdown("")
 
@@ -366,7 +377,7 @@ if st.session_state.mu_resultados is not None:
                 for _, row in df_rex.iterrows()
             ]
 
-            for item in res["sin_match"]:
+            for item in [x for x in res["sin_match"] if not busq_s or busq_s in x["col_cliente"].lower()]:
                 col_cli = item["col_cliente"]
                 with st.expander(f"❌ {col_cli}"):
                     sel = st.selectbox(
@@ -403,7 +414,7 @@ if st.session_state.mu_resultados is not None:
         ov = match_ov.get(m["col_cliente"])
         filas.append({
             "Concepto cliente": m["col_cliente"],
-            "Archivos":         ", ".join(conceptos.get(m["col_cliente"], [])),
+            "Mes(es)":          ", ".join(periodos.get(m["col_cliente"], conceptos.get(m["col_cliente"], []))),
             "Código Rex+":      ov["concepto_rex"] if ov else m["concepto_rex"],
             "Nombre Rex+":      ov["nombre_rex"]   if ov else m["nombre_rex"],
             "Tipo Rex+":        ov["tipo_rex"]      if ov else m["tipo_rex"],
@@ -416,7 +427,7 @@ if st.session_state.mu_resultados is not None:
         asig = asigs.get(col_cli)
         filas.append({
             "Concepto cliente": col_cli,
-            "Archivos":         ", ".join(conceptos.get(col_cli, [])),
+            "Mes(es)":          ", ".join(periodos.get(col_cli, conceptos.get(col_cli, []))),
             "Código Rex+":      asig["concepto_rex"] if asig else "",
             "Nombre Rex+":      asig["nombre_rex"]   if asig else "",
             "Tipo Rex+":        asig["tipo_rex"]      if asig else "",
@@ -429,7 +440,7 @@ if st.session_state.mu_resultados is not None:
         asig = asigs.get(col_cli)
         filas.append({
             "Concepto cliente": col_cli,
-            "Archivos":         ", ".join(conceptos.get(col_cli, [])),
+            "Mes(es)":          ", ".join(periodos.get(col_cli, conceptos.get(col_cli, []))),
             "Código Rex+":      asig["concepto_rex"] if asig else "",
             "Nombre Rex+":      asig["nombre_rex"]   if asig else "",
             "Tipo Rex+":        asig["tipo_rex"]      if asig else "",
