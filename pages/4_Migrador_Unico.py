@@ -94,6 +94,7 @@ if "mu_resultados"   not in st.session_state: st.session_state.mu_resultados   =
 if "mu_df_rex"       not in st.session_state: st.session_state.mu_df_rex       = None
 if "mu_conceptos"    not in st.session_state: st.session_state.mu_conceptos    = None
 if "mu_asignaciones" not in st.session_state: st.session_state.mu_asignaciones = {}
+if "mu_eliminados"   not in st.session_state: st.session_state.mu_eliminados   = set()
 
 # ─────────────────────────────────────────────
 # PASO 1 — CARGA DE ARCHIVOS
@@ -202,79 +203,100 @@ if st.session_state.mu_resultados is not None:
     # ── MATCHES AUTOMÁTICOS ──────────────────────────────────────────────────
     with tab_match:
         if res["match"]:
-            df_m = pd.DataFrame(res["match"])
-            df_m = df_m.rename(columns={
-                "col_cliente":  "Concepto cliente",
-                "concepto_rex": "Código Rex+",
-                "nombre_rex":   "Nombre Rex+",
-                "tipo_rex":     "Tipo",
-                "score":        "Score",
-                "metodo":       "Método",
-            })
-            st.dataframe(df_m, use_container_width=True, hide_index=True)
+            st.markdown(
+                '<div class="section-sub">Marca la casilla <b>🗑️ Eliminar</b> en las filas duplicadas y presiona el botón para quitarlas.</div>',
+                unsafe_allow_html=True,
+            )
+            df_m = pd.DataFrame([
+                {
+                    "Eliminar":          False,
+                    "Concepto cliente":  m["col_cliente"],
+                    "Codigo Rex+":       m["concepto_rex"],
+                    "Nombre Rex+":       m["nombre_rex"],
+                    "Tipo":              m["tipo_rex"],
+                    "Score":             m["score"],
+                    "Metodo":            m["metodo"],
+                }
+                for m in res["match"]
+            ])
+            edited_df = st.data_editor(
+                df_m,
+                use_container_width=True,
+                hide_index=True,
+                column_config={
+                    "Eliminar": st.column_config.CheckboxColumn("Eliminar", width="small"),
+                    "Score":    st.column_config.NumberColumn(format="%.0f%%"),
+                },
+                disabled=["Concepto cliente", "Codigo Rex+", "Nombre Rex+", "Tipo", "Score", "Metodo"],
+            )
+            a_eliminar = edited_df[edited_df["Eliminar"]]["Concepto cliente"].tolist()
+            if a_eliminar:
+                if st.button(f"Eliminar {len(a_eliminar)} fila(s) marcada(s)"):
+                    st.session_state.mu_resultados["match"] = [
+                        m for m in res["match"]
+                        if m["col_cliente"] not in a_eliminar
+                    ]
+                    st.rerun()
         else:
             st.markdown('<div class="alert-warning">No se encontraron matches automáticos.</div>', unsafe_allow_html=True)
 
     # ── DUDOSOS ──────────────────────────────────────────────────────────────
     with tab_dudoso:
         if res["dudoso"]:
-            st.markdown('<div class="alert-warning">⚠️ Estos conceptos tienen una coincidencia dudosa. Selecciona la opción correcta o descártala.</div>', unsafe_allow_html=True)
+            st.markdown(
+                '<div class="alert-warning">⚠️ El sistema no pudo confirmar estos conceptos. '
+                'Elige en la columna derecha el concepto Rex+ correcto para cada uno.</div>',
+                unsafe_allow_html=True,
+            )
             st.markdown("")
-
-            # Opciones Rex+ para el selectbox
+            h1, h2 = st.columns([2, 3])
+            h1.markdown("**Concepto del cliente**")
+            h2.markdown("**Asignar a concepto Rex+**")
+            st.markdown('<hr style="margin:4px 0 12px 0">', unsafe_allow_html=True)
             opciones_rex = ["— Sin asignar —"] + [
                 f"{row['Concepto']} | {row['Nombre']} ({row['Tipo']})"
                 for _, row in df_rex.iterrows()
             ]
-
             for item in res["dudoso"]:
                 col_cli = item["col_cliente"]
                 sugs    = item["sugerencias"]
-
-                with st.expander(f"📌 {col_cli}", expanded=True):
-                    st.markdown(f"**Nombre limpio analizado:** `{item['col_limpia']}`")
-                    st.markdown("**Sugerencias:**")
-
-                    sug_options = ["— Ninguna de estas —"] + [
-                        f"{s['concepto']} | {s['nombre']} ({s['tipo']})  —  {s['score']:.0f}%"
-                        for s in sugs
-                    ]
-
-                    sel = st.radio(
-                        "Selecciona el match correcto:",
-                        sug_options,
-                        key=f"mu_radio_{col_cli}",
-                        horizontal=False,
+                mejor   = sugs[0] if sugs else None
+                c_left, c_right = st.columns([2, 3])
+                with c_left:
+                    score_txt = f"{mejor['score']:.0f}%" if mejor else "—"
+                    score_col = "#d69e2e" if mejor and mejor["score"] >= 70 else "#e53e3e"
+                    st.markdown(
+                        f'<div style="padding:6px 0 10px 0">'
+                        f'<div style="font-weight:600;color:#1a2744;font-size:14px;">{col_cli}</div>'
+                        f'<div style="font-size:12px;color:#6b7a9a;margin-top:2px;">Mejor coincidencia: '
+                        f'<span style="color:{score_col};font-weight:700;">{score_txt}</span></div></div>',
+                        unsafe_allow_html=True,
                     )
-
-                    if sel != "— Ninguna de estas —":
-                        # Guardar la selección
-                        idx_sug = sug_options.index(sel) - 1
-                        sug_elegida = sugs[idx_sug]
+                with c_right:
+                    default_idx = 0
+                    if mejor:
+                        best_plain = f"{mejor['concepto']} | {mejor['nombre']} ({mejor['tipo']})"
+                        if best_plain in opciones_rex:
+                            default_idx = opciones_rex.index(best_plain)
+                    sel = st.selectbox(
+                        f"concepto_{col_cli}",
+                        opciones_rex,
+                        index=default_idx,
+                        key=f"mu_dud_{col_cli}",
+                        label_visibility="collapsed",
+                    )
+                    if sel != "— Sin asignar —":
+                        codigo = sel.split(" | ")[0]
+                        fila = df_rex[df_rex["Concepto"] == codigo].iloc[0]
                         asigs[col_cli] = {
-                            "concepto_rex": sug_elegida["concepto"],
-                            "nombre_rex":   sug_elegida["nombre"],
-                            "tipo_rex":     sug_elegida["tipo"],
-                            "metodo":       "Manual (dudoso confirmado)",
+                            "concepto_rex": fila["Concepto"],
+                            "nombre_rex":   fila["Nombre"],
+                            "tipo_rex":     fila["Tipo"],
+                            "metodo":       "Manual (dudoso)",
                         }
-                    else:
-                        # Asignación manual libre
-                        sel_libre = st.selectbox(
-                            "O asigna manualmente desde Rex+:",
-                            opciones_rex,
-                            key=f"mu_libre_{col_cli}",
-                        )
-                        if sel_libre != "— Sin asignar —":
-                            codigo = sel_libre.split(" | ")[0]
-                            fila = df_rex[df_rex["Concepto"] == codigo].iloc[0]
-                            asigs[col_cli] = {
-                                "concepto_rex": fila["Concepto"],
-                                "nombre_rex":   fila["Nombre"],
-                                "tipo_rex":     fila["Tipo"],
-                                "metodo":       "Manual (desde dudoso)",
-                            }
-                        elif col_cli in asigs:
-                            del asigs[col_cli]
+                    elif col_cli in asigs:
+                        del asigs[col_cli]
+                st.markdown('<hr style="margin:4px 0 8px 0;border-color:#e8edf5">', unsafe_allow_html=True)
         else:
             st.markdown('<div class="alert-success">✅ No hay conceptos dudosos.</div>', unsafe_allow_html=True)
 
