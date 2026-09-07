@@ -18,7 +18,7 @@ PATRONES_META = [
     'año', 'mes', 'rut', 'nombre', 'apellido', 'trabajador', 'empleado',
     'empresa', 'area', 'zona', 'sucursal', 'centro costo', 'centro de costo',
     'cargo', 'contrato', 'jornada', 'n°', 'nro', 'numero', 'numero', 'folio',
-    'dias trabajados', 'dias licencia', 'dias ausencia', 'hhs.', 'horas a pago',
+    'hhs.', 'horas a pago',
     'remuneracion imponible', 'remuneracion no imponible', 'remuneracion total',
     'renta tributable', 'descuentos legales', 'otros descuentos',
     'sueldo liquido', 'anticipos',
@@ -37,7 +37,7 @@ def normalizar(texto: str) -> str:
 
 # Patrones que requieren word-boundary para evitar falsos positivos
 # (ej: 'empleado' no debe filtrar 'empleador')
-_PATRONES_WB = {'empleado', 'empresa'}
+_PATRONES_WB = {'empleado', 'empresa', 'trabajador'}
 
 def es_columna_meta(nombre_col: str) -> bool:
     """Detecta si una columna es metadata del trabajador (no concepto de remuneración)."""
