@@ -474,7 +474,8 @@ if st.session_state.mu_resultados is not None:
     # Generar Excel
     buf = BytesIO()
     with pd.ExcelWriter(buf, engine="openpyxl") as writer:
-        df_final.to_excel(writer, index=False, sheet_name="Mapeo conceptos")
+        cols_excel = [c for c in df_final.columns if c != "Mes(es)"]
+        df_final[cols_excel].to_excel(writer, index=False, sheet_name="Mapeo conceptos")
     buf.seek(0)
 
     st.download_button(
