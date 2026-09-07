@@ -113,3 +113,4 @@ with col3:
 
 st.divider()
 st.caption("Rex+ Tools · Visma · Uso interno")
+st.page_link("pages/4_Migrador_Unico.py", label="🔄 Migrador Único", icon="🔄")
