@@ -448,6 +448,8 @@ def validar_columnas_lre(df):
     for col in df.columns:
         if col in nombres_oficiales:
             continue  # coincide exactamente
+        if col == COL_MES_PROCESO or str(col).startswith("_"):
+            continue  # columnas agregadas por el proceso, no vienen de la DT
         # Buscar si algún código conocido está en el nombre de la columna
         codigo_encontrado = None
         for cod, nombre_oficial in LRE_COLUMNAS.items():
@@ -520,43 +522,137 @@ def mostrar_aviso_columnas(diferencias, desconocidas):
 
 
 
+MSG_NOMBRE_INVALIDO = "Nombre de archivo no cumple los requisitos"
+
+# Nombres y abreviaturas de mes aceptados en el nombre del archivo
+_MESES_NOMBRE = {
+    "enero": "01", "ene": "01",
+    "febrero": "02", "feb": "02",
+    "marzo": "03", "mar": "03",
+    "abril": "04", "abr": "04",
+    "mayo": "05", "may": "05",
+    "junio": "06", "jun": "06",
+    "julio": "07", "jul": "07",
+    "agosto": "08", "ago": "08",
+    "septiembre": "09", "setiembre": "09", "sept": "09", "sep": "09", "set": "09",
+    "octubre": "10", "oct": "10",
+    "noviembre": "11", "nov": "11",
+    "diciembre": "12", "dic": "12",
+}
+# Alternativas ordenadas de más larga a más corta ("septiembre" antes que "sep")
+_RE_MES = "|".join(sorted(_MESES_NOMBRE, key=len, reverse=True))
+
+
+def _normalizar_anio(anio_txt):
+    """'26' → '2026'; '2026' → '2026'."""
+    return f"20{anio_txt}" if len(anio_txt) == 2 else anio_txt
+
+
 def extraer_fecha_dt(nombre_archivo):
     """
-    Intenta extraer yyyy-mm del nombre del archivo.
-    Patrones soportados: 'enero_2025', '2025_01', '202501', 'enero-2025', etc.
+    Extrae el período (yyyy-mm) desde el nombre del archivo.
+
+    Formatos aceptados (mayúsculas/minúsculas indistinto; separador _ - espacio o punto):
+      - Mes (nombre o abreviatura) + año de 2 o 4 dígitos:
+            'Ene_26_declaracion-10606977.csv', 'Julio_26_...', 'enero-2026', 'sep 2026'
+      - Año + mes (nombre o abreviatura):   '2026_enero', '26-ene'
+      - Numérico año-mes:                    '2026-01', '2026_01', '202601'
+
     Retorna (fecha_str, True) si se encontró, (None, False) si no.
     """
-    meses_es = {
-        "enero": "01", "febrero": "02", "marzo": "03", "abril": "04",
-        "mayo": "05", "junio": "06", "julio": "07", "agosto": "08",
-        "septiembre": "09", "octubre": "10", "noviembre": "11", "diciembre": "12"
-    }
+    nombre = os.path.splitext(os.path.basename(str(nombre_archivo)))[0].lower()
 
-    nombre = nombre_archivo.lower()
-
-    # Patrón: mes_nombre + año  ej: enero_2025, enero-2025
-    for mes_nom, mes_num in meses_es.items():
-        patron = rf"{mes_nom}[_\-\s](\d{{4}})"
-        m = re.search(patron, nombre)
-        if m:
-            return f"{m.group(1)}-{mes_num}", True
-        # año + mes_nombre  ej: 2025_enero
-        patron2 = rf"(\d{{4}})[_\-\s]{mes_nom}"
-        m2 = re.search(patron2, nombre)
-        if m2:
-            return f"{m2.group(1)}-{mes_num}", True
-
-    # Patrón: yyyymm  ej: 202501
-    m = re.search(r"(20\d{2})(0[1-9]|1[0-2])", nombre)
+    # 1) Mes + año   ej: ene_26, julio_2026
+    m = re.search(rf"(?<![a-z])({_RE_MES})[_\-\s\.]*(\d{{4}}|\d{{2}})(?!\d)", nombre)
     if m:
-        return f"{m.group(1)}-{m.group(2)}", True
+        return f"{_normalizar_anio(m.group(2))}-{_MESES_NOMBRE[m.group(1)]}", True
 
-    # Patrón: yyyy-mm o yyyy_mm
-    m = re.search(r"(20\d{2})[_\-](0[1-9]|1[0-2])", nombre)
+    # 2) Año + mes   ej: 2026_enero, 26-ene
+    m = re.search(rf"(?<!\d)(\d{{4}}|\d{{2}})[_\-\s\.]*({_RE_MES})(?![a-z])", nombre)
+    if m:
+        return f"{_normalizar_anio(m.group(1))}-{_MESES_NOMBRE[m.group(2)]}", True
+
+    # 3) yyyy-mm / yyyy_mm / yyyymm (solo si no es parte de un número más largo)
+    m = re.search(r"(?<!\d)(20\d{2})[_\-\.]?(0[1-9]|1[0-2])(?!\d)", nombre)
     if m:
         return f"{m.group(1)}-{m.group(2)}", True
 
     return None, False
+
+
+# ─────────────────────────────────────────────
+# CONSOLIDACIÓN DE ARCHIVOS DT
+# ─────────────────────────────────────────────
+COL_MES_PROCESO = "Mes de proceso"
+
+
+def validar_nombres_archivos_dt(archivos):
+    """
+    Verifica que TODOS los archivos traigan año-mes en el nombre.
+    Retorna (periodos, invalidos):
+      - periodos : lista de (archivo, 'yyyy-mm') para los válidos
+      - invalidos: lista de nombres de archivo que no cumplen
+    """
+    periodos, invalidos = [], []
+    for f in archivos:
+        fecha, ok = extraer_fecha_dt(f.name)
+        if ok:
+            periodos.append((f, fecha))
+        else:
+            invalidos.append(f.name)
+    return periodos, invalidos
+
+
+def consolidar_archivos_dt(periodos):
+    """
+    Lee cada archivo DT (dejando el encabezado como primera fila, esté donde esté)
+    y los une en un solo DataFrame con 'Mes de proceso' como primera columna.
+
+    periodos: lista de (archivo, 'yyyy-mm') — salida de validar_nombres_archivos_dt.
+    Retorna (df_consolidado, resumen) donde resumen es una lista de dicts por archivo.
+    """
+    partes, resumen = [], []
+    for f, fecha in sorted(periodos, key=lambda x: (x[1], x[0].name)):
+        f.seek(0)
+        df_f = leer_csv_dt(f).copy()  # copia compacta (evita PerformanceWarning)
+        df_f.insert(0, COL_MES_PROCESO, fecha)
+        df_f["_archivo_origen"] = f.name
+        partes.append(df_f)
+        resumen.append({"Archivo": f.name, COL_MES_PROCESO: fecha, "Registros": len(df_f)})
+
+    if not partes:
+        return pd.DataFrame(), resumen
+    df_cons = pd.concat(partes, ignore_index=True, sort=False)
+    # Mantener 'Mes de proceso' como primera columna
+    cols = [COL_MES_PROCESO] + [c for c in df_cons.columns if c != COL_MES_PROCESO]
+    return df_cons[cols], resumen
+
+
+def generar_excel_consolidado(df_cons):
+    """Excel (.xlsx) del consolidado DT, sin columnas técnicas '_'."""
+    cols = [c for c in df_cons.columns if not str(c).startswith("_")]
+    df_out = df_cons[cols].copy()
+    # Evitar que montos enteros queden como 558630.0
+    for c in df_out.columns:
+        if pd.api.types.is_float_dtype(df_out[c]):
+            v = df_out[c].dropna()
+            if (v == v.round()).all():
+                df_out[c] = df_out[c].astype("Int64")
+
+    output = io.BytesIO()
+    with pd.ExcelWriter(output, engine="openpyxl") as writer:
+        df_out.to_excel(writer, index=False, sheet_name="Consolidado DT")
+        ws = writer.sheets["Consolidado DT"]
+        header_fill = PatternFill("solid", fgColor="1A2744")
+        header_font = Font(bold=True, color="FFFFFF", size=10)
+        for cell in ws[1]:
+            cell.fill = header_fill
+            cell.font = header_font
+            cell.alignment = Alignment(horizontal="center", vertical="center", wrap_text=True)
+            ws.column_dimensions[cell.column_letter].width = 16
+        ws.row_dimensions[1].height = 45
+        ws.freeze_panes = "C2"   # fija Mes de proceso y Rut
+    return output.getvalue()
 
 
 # ─────────────────────────────────────────────
@@ -1040,10 +1136,6 @@ def generar_filas_dt(df, fecha_proceso, refs, df_empleados, df_empresas_externo=
         # ── Generar fila por cada concepto ──
         for id_concepto, monto in montos_por_concepto.items():
 
-            # FIX: licenciaDias se agrega explícitamente después del loop → evitar duplicado
-            if id_concepto == "licenciaDias":
-                continue
-
             if licencia_mes_completo and id_concepto not in CONCEPTOS_LICENCIA_COMPLETA:
                 continue
 
@@ -1195,8 +1287,6 @@ def generar_excel_dt(df_salida):
         cell.alignment = Alignment(horizontal="center", vertical="center")
         ws.column_dimensions[cell.column_letter].width = max(len(col) + 4, 14)
 
-    col_cot_jub_idx = next((i+1 for i, c in enumerate(cols) if c == "Cotización de jubilación"), None)
-
     for ri, row in enumerate(df_salida.itertuples(index=False), 2):
         fill = PatternFill("solid", fgColor="EAF0F8") if ri % 2 == 0 else PatternFill("solid", fgColor="FFFFFF")
         for ci, val in enumerate(row, 1):
@@ -1204,8 +1294,6 @@ def generar_excel_dt(df_salida):
             cell.fill = fill
             cell.border = border
             cell.alignment = Alignment(vertical="center")
-            if col_cot_jub_idx and ci == col_cot_jub_idx and isinstance(val, (int, float)):
-                cell.number_format = "0.00"
 
     ws.freeze_panes = "A2"
     wb.save(output)
@@ -1568,38 +1656,68 @@ def render_modulo_dt(refs_compartidas):
                 unsafe_allow_html=True
             )
 
-    if not archivos_dt or not archivo_empleados or not archivo_empresas or not archivo_params_dt:
-        return
-
-    # ── Parsear fechas de todos los archivos subidos ──
+    # ── Paso 1: validar nombres y consolidar todos los archivos DT ──
+    df_consolidado_dt = pd.DataFrame()
     archivos_por_mes = {}
-    archivos_sin_fecha = []
-    for f in archivos_dt:
-        fecha_f, ok_f = extraer_fecha_dt(f.name)
-        if ok_f:
-            if fecha_f in archivos_por_mes:
-                st.markdown(
-                    f'<div class="alert-warning">⚠️ Hay más de un archivo con el período <b>{fecha_f}</b>. Se usará el último: <b>{f.name}</b>.</div>',
-                    unsafe_allow_html=True
-                )
-            archivos_por_mes[fecha_f] = f
-        else:
-            archivos_sin_fecha.append(f.name)
+    if archivos_dt:
+        st.markdown('<hr class="rex-divider">', unsafe_allow_html=True)
+        st.markdown("### 🗂️ Consolidación de archivos DT")
 
-    if archivos_sin_fecha:
+        periodos_dt, nombres_invalidos = validar_nombres_archivos_dt(archivos_dt)
+        if nombres_invalidos:
+            filas = "".join(f"<li><code>{n}</code></li>" for n in nombres_invalidos)
+            st.markdown(
+                f'<div class="alert-error">❌ <b>{MSG_NOMBRE_INVALIDO}.</b><br>'
+                f'Los siguientes archivos no incluyen año-mes en el nombre:<ul>{filas}</ul>'
+                f'Proceso abortado. Renombra los archivos (ej: <code>Ene_26_declaracion.csv</code>, '
+                f'<code>2026-01_declaracion.csv</code>) y vuelve a subirlos.</div>',
+                unsafe_allow_html=True
+            )
+            st.stop()
+
+        try:
+            df_consolidado_dt, resumen_cons = consolidar_archivos_dt(periodos_dt)
+        except Exception as e_cons:
+            st.markdown(
+                f'<div class="alert-error">❌ Error al consolidar los archivos: <b>{e_cons}</b>. Proceso abortado.</div>',
+                unsafe_allow_html=True
+            )
+            st.stop()
+
+        df_resumen = pd.DataFrame(resumen_cons)
+        meses_dup = df_resumen[COL_MES_PROCESO][df_resumen[COL_MES_PROCESO].duplicated()].unique().tolist()
+        if meses_dup:
+            st.markdown(
+                f'<div class="alert-warning">⚠️ Hay más de un archivo para el mes: <b>{", ".join(meses_dup)}</b>. '
+                f'Todos quedaron en el consolidado; revisa si alguno es una copia.</div>',
+                unsafe_allow_html=True
+            )
+
+        meses_cons = sorted(df_consolidado_dt[COL_MES_PROCESO].unique())
         st.markdown(
-            f'<div class="alert-warning">⚠️ No se pudo determinar el período de {len(archivos_sin_fecha)} archivo(s): '
-            f'<b>{", ".join(archivos_sin_fecha)}</b>. Estos no se usarán como histórico.<br>'
-            f'Renombra los archivos incluyendo el mes y año (ej: <code>enero_2025.csv</code>).</div>',
+            f'<div class="alert-success">✅ <b>{len(periodos_dt)} archivo(s) consolidados</b> — '
+            f'{len(df_consolidado_dt)} registros, meses: <b>{", ".join(meses_cons)}</b></div>',
             unsafe_allow_html=True
         )
-
-    if not archivos_por_mes:
-        st.markdown(
-            '<div class="alert-error">❌ No se pudo determinar el período de ningún archivo. '
-            'Renombra los archivos incluyendo el mes y año (ej: enero_2025.csv).</div>',
-            unsafe_allow_html=True
+        with st.expander("👁️ Ver detalle del consolidado"):
+            st.dataframe(df_resumen, use_container_width=True, hide_index=True)
+            st.dataframe(
+                df_consolidado_dt[[c for c in df_consolidado_dt.columns if not str(c).startswith("_")]].head(50),
+                use_container_width=True, hide_index=True
+            )
+        st.download_button(
+            label="⬇️ Descargar consolidado DT (.xlsx)",
+            data=generar_excel_consolidado(df_consolidado_dt),
+            file_name=f"consolidado_dt_{meses_cons[0]}_a_{meses_cons[-1]}.xlsx",
+            mime="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet",
+            key="dt_btn_consolidado"
         )
+
+        # Un archivo por mes para el resto del proceso (si hay duplicados se usa el último)
+        for f, fecha in periodos_dt:
+            archivos_por_mes[fecha] = f
+
+    if not archivos_dt or not archivo_empleados or not archivo_empresas or not archivo_params_dt:
         return
 
     # ── Selector de mes a procesar ──
@@ -1803,6 +1921,13 @@ def render_modulo_dt(refs_compartidas):
                 st.dataframe(df_log_contratos, use_container_width=True, hide_index=True)
 
             log_cont_bytes = generar_excel_log(df_log_contratos)
+            st.download_button(
+                label="⬇️ Descargar log_multiples_contratos.xlsx",
+                data=log_cont_bytes,
+                file_name=f"log_multiples_contratos_{fecha_proceso}.xlsx",
+                mime="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet",
+                key="dt_btn_log_contratos"
+            )
 
         # ── Log Parcial 7 ──
         if log_parcial7_rows:
@@ -1816,6 +1941,14 @@ def render_modulo_dt(refs_compartidas):
                 st.dataframe(pd.DataFrame(log_parcial7_rows), use_container_width=True, hide_index=True)
 
             log_p7_bytes = generar_excel_log_parcial7(log_parcial7_rows)
+            if log_p7_bytes:
+                st.download_button(
+                    label="⬇️ Descargar log_parcial7_sin_imponible.xlsx",
+                    data=log_p7_bytes,
+                    file_name=f"log_parcial7_{fecha_proceso}_{datetime.now().strftime('%Y%m%d_%H%M%S')}.xlsx",
+                    mime="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet",
+                    key="dt_btn_log_parcial7"
+                )
 
         if df_salida.empty:
             st.markdown('<div class="alert-warning">⚠️ No se generaron registros. Verifica que el archivo y los parámetros sean correctos.</div>', unsafe_allow_html=True)
@@ -1843,6 +1976,13 @@ def render_modulo_dt(refs_compartidas):
         barra.progress(95, text="Generando Excel...")
         excel_bytes = generar_excel_dt(df_salida)
         barra.progress(100, text="✅ Proceso completado")
+        st.download_button(
+            label="⬇️ Descargar archivo de salida (.xlsx)",
+            data=excel_bytes,
+            file_name=f"liquidaciones_dt_{fecha_proceso}_{datetime.now().strftime('%Y%m%d_%H%M%S')}.xlsx",
+            mime="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet",
+            key="dt_btn_descarga"
+        )
 
         if not df_salida_sin_contrato.empty:
             st.markdown(f"""
@@ -1850,54 +1990,10 @@ def render_modulo_dt(refs_compartidas):
                 ⚠️ <b>{df_salida_sin_contrato["Id empleado"].nunique()} trabajador(es)</b> con contrato indeterminado fueron incluidos en un segundo archivo sin número de contrato.
             </div>""", unsafe_allow_html=True)
             excel_bytes_sc = generar_excel_dt(df_salida_sin_contrato)
-
-        # Guardar en session_state para que descargas persistan entre reruns
-        _dt_res = {"fecha_proceso": fecha_proceso, "excel_bytes": excel_bytes}
-        if not df_log_contratos.empty:
-            _dt_res["log_cont_bytes"] = log_cont_bytes
-        if log_parcial7_rows and log_p7_bytes:
-            _dt_res["log_p7_bytes"] = log_p7_bytes
-        if not df_salida_sin_contrato.empty:
-            _dt_res["excel_bytes_sc"] = excel_bytes_sc
-        st.session_state["dt_resultados"] = _dt_res
-
-    # Descargas: se renderizan fuera del bloque del boton para persistir entre reruns
-    if "dt_resultados" in st.session_state:
-        _res = st.session_state["dt_resultados"]
-        _fp  = _res["fecha_proceso"]
-        _ts  = __import__("datetime").datetime.now().strftime("%Y%m%d_%H%M%S")
-        st.download_button(
-            label="⬇️ Descargar archivo de salida (.xlsx)",
-            data=_res["excel_bytes"],
-            file_name=f"liquidaciones_dt_{_fp}_{_ts}.xlsx",
-            mime="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet",
-            key="dt_btn_descarga"
-        )
-        if "log_cont_bytes" in _res:
-            st.download_button(
-                label="⬇️ Descargar log_multiples_contratos.xlsx",
-                data=_res["log_cont_bytes"],
-                file_name=f"log_multiples_contratos_{_fp}.xlsx",
-                mime="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet",
-                key="dt_btn_log_contratos"
-            )
-        if "log_p7_bytes" in _res:
-            st.download_button(
-                label="⬇️ Descargar log_parcial7_sin_imponible.xlsx",
-                data=_res["log_p7_bytes"],
-                file_name=f"log_parcial7_{_fp}_{_ts}.xlsx",
-                mime="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet",
-                key="dt_btn_log_parcial7"
-            )
-        if "excel_bytes_sc" in _res:
             st.download_button(
                 label="⬇️ Descargar registros sin contrato (.xlsx)",
-                data=_res["excel_bytes_sc"],
-                file_name=f"liquidaciones_dt_sin_contrato_{_fp}_{_ts}.xlsx",
+                data=excel_bytes_sc,
+                file_name=f"liquidaciones_dt_sin_contrato_{fecha_proceso}_{datetime.now().strftime('%Y%m%d_%H%M%S')}.xlsx",
                 mime="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet",
                 key="dt_btn_descarga_sc"
             )
-        st.markdown("---")
-        if st.button("🔄 Nuevo proceso", key="dt_btn_nuevo_proceso"):
-            del st.session_state["dt_resultados"]
-            st.rerun()
