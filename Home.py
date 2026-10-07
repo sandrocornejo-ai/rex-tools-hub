@@ -111,3 +111,21 @@ with col3:
     """, unsafe_allow_html=True)
     st.page_link("pages/3_Migracion_Hero.py", label="Abrir herramienta →", use_container_width=True)
 
+st.markdown("<br>", unsafe_allow_html=True)
+col4, _, _ = st.columns(3, gap="large")
+
+with col4:
+    st.markdown("""
+    <div class="tool-card">
+        <div class="tool-icon">🏛️</div>
+        <div class="tool-title">4 · Migración desde LRE DT</div>
+        <div class="tool-desc">
+            Consolida los LRE descargados desde la DT y arma el maestro con
+            empresa, contrato, instituciones, tasas, topes y cálculos de licencias.
+        </div>
+        <span class="tag">ETAPA 1</span>
+        <span class="tag">LRE DT</span>
+        <span class="tag">Maestro</span>
+    </div>
+    """, unsafe_allow_html=True)
+    st.page_link("pages/4_Migracion_LRE_DT.py", label="Abrir herramienta →", use_container_width=True)
