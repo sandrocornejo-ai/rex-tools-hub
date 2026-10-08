@@ -4,7 +4,8 @@ salir.py — Botón "Salir" de Rex+ Tools (barra lateral) y aviso al cerrar la p
 - Mientras la app está abierta, si el usuario intenta cerrar la pestaña o la ventana, el navegador
   muestra su aviso de confirmación. (Chrome/Edge muestran su propio texto; no permiten uno personalizado.)
 - El botón Salir quita ese aviso, borra los datos de la sesión (archivos subidos, ingresos manuales)
-  y muestra "Ya puedes cerrar esta pestaña".
+  y cierra la pestaña. Si el navegador no permite cerrarla (Chrome/Edge solo dejan cerrar pestañas
+  abiertas por un script), la deja en blanco.
 - En el computador (streamlit run) además detiene el programa. En Streamlit Cloud no lo detiene,
   porque cortaría la app para todos los usuarios.
 
@@ -33,14 +34,25 @@ _JS_ACTIVAR_AVISO = f"""
 </script>
 """
 
-_JS_QUITAR_AVISO = """
+_JS_CERRAR = """
 <script>
 (function () {
+  // El iframe de Streamlit está aislado (sandbox) y no puede cerrar ni navegar la página principal,
+  // por eso el código se inserta como <script> en la página principal y corre desde ahí.
   var w = window.parent;
-  if (w.__rexAvisoCierre) {
-    w.removeEventListener("beforeunload", w.__rexAvisoCierre);
-    w.__rexAvisoCierre = null;
-  }
+  var codigo = [
+    "if (window.__rexAvisoCierre) {",
+    "  window.removeEventListener('beforeunload', window.__rexAvisoCierre);",
+    "  window.__rexAvisoCierre = null;",
+    "}",
+    "window.open('', '_self');",
+    "window.close();",
+    // Si el navegador no permite cerrar la pestaña, la deja en blanco (la aplicación ya no queda visible)
+    "setTimeout(function () { window.location.replace('about:blank'); }, 300);"
+  ].join("\\n");
+  var sc = w.document.createElement("script");
+  sc.textContent = codigo;
+  w.document.body.appendChild(sc);
 })();
 </script>
 """
@@ -64,22 +76,18 @@ def _detener_programa():
     os._exit(0)
 
 
-def _pantalla_cerrada():
-    _inyectar_js(_JS_QUITAR_AVISO)
-    st.success("✅ Sesión cerrada. Los datos cargados se borraron de la memoria. Ya puedes cerrar esta pestaña.")
+def _cerrar():
+    """Quita el aviso de cierre, cierra la pestaña (o la deja en blanco) y, en el computador, detiene el programa."""
+    _inyectar_js(_JS_CERRAR)
     if _es_local():
-        st.info("El programa se detuvo en tu computador. Para volver a abrirlo: `streamlit run Home.py`")
         threading.Timer(2.0, _detener_programa).start()
-    elif st.button("↩️ Volver a Rex+ Tools", key="btn_volver_rex"):
-        st.session_state.clear()
-        st.rerun()
     st.stop()
 
 
 def boton_salir():
     """Agrega el botón Salir en la barra lateral y activa el aviso al cerrar la pestaña."""
     if st.session_state.get(CLAVE_SALIR):
-        _pantalla_cerrada()
+        _cerrar()
     _inyectar_js(_JS_ACTIVAR_AVISO)
     with st.sidebar:
         st.markdown("---")
