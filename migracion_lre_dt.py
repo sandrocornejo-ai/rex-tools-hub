@@ -831,13 +831,16 @@ def calcular_ult_imp_sin_lic(df):
 
 def cargar_equiv_conceptos(ruta=RUTA_EQUIV):
     """
-    Lee data/equiv_conceptos.xlsx (cod_lre, concepto_detalle, Tipo).
+    Lee data/equiv_conceptos.xlsx: formato nuevo (cod_lre_dt, id_concepto, tipo_concepto, nombre_concepto)
+    o antiguo (cod_lre, concepto_detalle, Tipo).
     Retorna {código LRE de 4 dígitos: Tipo}. Un código con dos Tipos distintos es error.
     """
     if not os.path.exists(ruta):
         raise ErrorArchivo(f"No se encontró el archivo de equivalencias: {ruta}")
     df = pd.read_excel(ruta, dtype=str)
     df.columns = [str(c).strip() for c in df.columns]
+    # Formato nuevo (cod_lre_dt, id_concepto, tipo_concepto, nombre_concepto) → nombres internos
+    df = df.rename(columns={"cod_lre_dt": "cod_lre", "id_concepto": "concepto_detalle", "tipo_concepto": "Tipo"})
     faltan = [c for c in ("cod_lre", "Tipo") if c not in df.columns]
     if faltan:
         raise ErrorArchivo(f"equiv_conceptos.xlsx: faltan columnas {faltan}.")

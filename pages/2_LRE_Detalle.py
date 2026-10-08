@@ -382,6 +382,19 @@ def mostrar_alerta_conceptos_prohibidos(hallazgos):
 # ─────────────────────────────────────────────
 # FUNCIONES DE CARGA DE REFERENCIAS
 # ─────────────────────────────────────────────
+def normalizar_equiv(df):
+    """equiv_conceptos.xlsx en formato nuevo (cod_lre_dt, id_concepto, tipo_concepto) → nombres antiguos
+    (cod_lre, concepto_detalle, Tipo) que usan esta página y modulo_dt.py. El formato antiguo queda igual."""
+    df = df.copy()
+    df.columns = [str(c).strip() for c in df.columns]
+    df = df.rename(columns={"cod_lre_dt": "cod_lre", "id_concepto": "concepto_detalle", "tipo_concepto": "Tipo"})
+    if "cod_lre" in df.columns:
+        # El formato nuevo marca los conceptos sin código con el texto "Sin codigo en LRE DT" → vacío
+        sin_cod = df["cod_lre"].astype(str).str.strip().str.lower().str.startswith("sin codigo")
+        df.loc[sin_cod, "cod_lre"] = ""
+    return df
+
+
 @st.cache_data
 def cargar_referencias():
     refs = {}
@@ -399,6 +412,8 @@ def cargar_referencias():
         path = os.path.join(DATA_DIR, fname)
         if os.path.exists(path):
             refs[key] = pd.read_excel(path)
+            if key == "equiv_conceptos":
+                refs[key] = normalizar_equiv(refs[key])
         else:
             errores.append(fname)
     return refs, errores
@@ -1067,7 +1082,7 @@ with st.expander("⚙️ Equivalencia de conceptos de la base", expanded=False):
                 help="Archivo con la equivalencia de conceptos LRE → concepto Rex+."
             )
         if archivo_equiv:
-            refs["equiv_conceptos"] = pd.read_excel(archivo_equiv)
+            refs["equiv_conceptos"] = normalizar_equiv(pd.read_excel(archivo_equiv))
             st.markdown(
                 f'<div class="alert-success">✅ Conceptos cargados desde archivo: <b>{archivo_equiv.name}</b> — {len(refs["equiv_conceptos"])} conceptos.</div>',
                 unsafe_allow_html=True

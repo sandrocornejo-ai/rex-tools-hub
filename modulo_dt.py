@@ -1,3 +1,6 @@
+# ⚠️ OBSOLETO (desde 2026-10-08): este módulo se reemplazará por migracion_lre_dt.py (Migración desde LRE DT).
+# No se mantiene. Se moverá a _obsoletos cuando la Etapa 2 de Migración LRE DT esté terminada; antes hay que
+# quitar la sección DT de pages/2_LRE_Detalle.py y mover resolver_contrato/cargar_empleados (usadas por Hero).
 """
 modulo_dt.py
 Procesamiento del archivo de la Dirección del Trabajo (DT)
