@@ -670,6 +670,9 @@ st.set_page_config(
     page_icon="💼",
     layout="wide",
 )
+from salir import boton_salir  # noqa: E402
+boton_salir()
+
 
 st.title("💼 TeamWork → Rex+")
 st.caption("Transforma liquidaciones de TeamWork al formato de importación Rex+")

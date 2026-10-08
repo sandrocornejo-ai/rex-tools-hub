@@ -22,6 +22,9 @@ st.set_page_config(
     page_icon="💼",
     layout="wide"
 )
+from salir import boton_salir  # noqa: E402
+boton_salir()
+
 
 st.markdown("""
 <style>

@@ -14,6 +14,9 @@ Migración desde LRE DT — Etapa 1: Armado del maestro.
 6. El usuario elige el rango de meses corridos a procesar (uno, varios o todos). Los cálculos usan
    todos los meses subidos como historia; el maestro solo trae el rango elegido.
 
+7. Valida la cuadratura del Total líquido (5501) con dos fórmulas (Totales DT y Detalle por Tipo de
+   equiv_conceptos.xlsx). Si no cuadra: advertencia, celda en rojo y registro en el log; el proceso sigue.
+
 Ejecutar:  streamlit run migracion_lre_dt.py
 """
 
@@ -108,6 +111,18 @@ COLUMNAS_NUEVAS = [COL_MP_RUT, COL_ID_EMPRESA, COL_EMPRESA, COL_NUM_CONTRATO, CO
                    COL_NOMBRE_SALUD, COL_NOMBRE_CAJA, COL_NOMBRE_MUTUAL, COL_PORC_MUTUAL] \
                   + [nueva for _, nueva in PARAMETROS_A_TRAER] + [COL_REBAJA_LLSS, COL_ULT_IMP_SIN_LIC, COL_IMP_MES_ANT_LIC, COL_IMPONIBLE_LIC, COL_SUELDO_CONTRATO]
 COLUMNAS_TASA = [COL_PORC_AFP, COL_SIS, COL_PORC_MUTUAL]  # en porcentaje (x 100), 2 decimales en el Excel
+
+# Cuadratura del Total líquido (5501) — van después de 'Total líquido(5501)'
+COL_LIQUIDO_DT = "(5501)"
+COL_TOTAL_DESC_DT = "(5301)"
+CODIGOS_HABERES_TOT = ["(5210)", "(5220)", "(5230)", "(5240)"]
+COL_DIF_LIQ_TOT = "difLiqTotales_entrada"    # (5210+5220+5230+5240) − 5301 − 5501
+COL_DIF_LIQ_DET = "difLiqDetalle_entrada"    # (Haber afecto + Haber exento) − (Descuento + Descuento Legal) − 5501
+COLUMNAS_NUEVAS += [COL_DIF_LIQ_TOT, COL_DIF_LIQ_DET]
+TIPOS_SUMA = {"Haber afecto": 1, "Haber exento": 1, "Descuento": -1, "Descuento Legal": -1}
+CODIGOS_NO_SUMAN = {"5501", "3164", "3167"}  # 5501 = control · 3164 informativo · 3167 rebaja zona extrema
+TOLERANCIA_LIQ = 1
+ROJO_CLARO = "F8CBAD"
 VERDE_CLARO = "C6EFCE"
 MARCA_ENCABEZADO = "Rut trabajador"      # texto que identifica la fila de encabezado del LRE
 SEPARADOR = ";"
@@ -134,6 +149,7 @@ _RE_MES = "|".join(sorted(MESES, key=len, reverse=True))   # más largas primero
 # ─────────────────────────────────────────────
 DIR_DATA = os.path.join(os.path.dirname(os.path.abspath(__file__)), "data")
 RUTA_INSTITUCIONES = os.path.join(DIR_DATA, "Instituciones.xlsx")
+RUTA_EQUIV = os.path.join(DIR_DATA, "equiv_conceptos.xlsx")
 COLS_COT_AFP_HIST = ["id_afp_hist", "cot_hist_afp", "sis_hist"]
 COLS_PARAMETROS = ["mes_Proc"] + [col for col, _ in PARAMETROS_A_TRAER]
 
@@ -767,6 +783,81 @@ def calcular_ult_imp_sin_lic(df):
     return pd.Series(resultado, index=df.index, dtype=object)
 
 
+def cargar_equiv_conceptos(ruta=RUTA_EQUIV):
+    """
+    Lee data/equiv_conceptos.xlsx (cod_lre, concepto_detalle, Tipo).
+    Retorna {código LRE de 4 dígitos: Tipo}. Un código con dos Tipos distintos es error.
+    """
+    if not os.path.exists(ruta):
+        raise ErrorArchivo(f"No se encontró el archivo de equivalencias: {ruta}")
+    df = pd.read_excel(ruta, dtype=str)
+    df.columns = [str(c).strip() for c in df.columns]
+    faltan = [c for c in ("cod_lre", "Tipo") if c not in df.columns]
+    if faltan:
+        raise ErrorArchivo(f"equiv_conceptos.xlsx: faltan columnas {faltan}.")
+    df["cod"] = df["cod_lre"].astype(str).str.extract(r"\((\d{4})\)")[0]
+    df["Tipo"] = df["Tipo"].astype(str).str.strip()
+    df = df.dropna(subset=["cod"])
+    tipos = df.groupby("cod")["Tipo"].agg(lambda t: sorted(set(t)))
+    conflictos = {c: t for c, t in tipos.items() if len(t) > 1}
+    if conflictos:
+        raise ErrorArchivo(f"equiv_conceptos.xlsx: códigos con más de un Tipo {conflictos}.")
+    return {c: t[0] for c, t in tipos.items()}
+
+
+def agregar_cuadratura_liquido(df, tipos_lre):
+    """
+    Cuadratura del Total líquido (5501), por registro. Agrega después de 'Total líquido(5501)':
+      - difLiqTotales_entrada = (5210 + 5220 + 5230 + 5240) − 5301 − 5501
+      - difLiqDetalle_entrada = Σ columnas 2xxx/3xxx con signo según Tipo de equiv_conceptos
+                                (Haber afecto/Haber exento suman; Descuento/Descuento Legal restan) − 5501.
+                                No suman 5501 (control), 3164 (informativo) ni 3167 (zona extrema).
+    0 = cuadra (tolerancia ±1). Registros con días trabajados (1115) = 0 no se validan → vacío.
+    attrs['cols_sin_tipo']: {columna: n° registros con monto} de columnas 2xxx/3xxx sin Tipo.
+    """
+    def num(col):
+        return pd.to_numeric(df[col], errors="coerce").fillna(0)
+
+    col_liq = _buscar_col_codigo(df, COL_LIQUIDO_DT)
+    faltan = [c for c in [COL_LIQUIDO_DT, COL_TOTAL_DESC_DT] + CODIGOS_HABERES_TOT if _buscar_col_codigo(df, c) is None]
+    if faltan:
+        raise ErrorArchivo(f"No se encontraron las columnas {faltan} para la cuadratura del Total líquido.")
+    liquido = num(col_liq)
+
+    # 1) Totales DT
+    haberes = sum(num(_buscar_col_codigo(df, c)) for c in CODIGOS_HABERES_TOT)
+    dif_tot = haberes - num(_buscar_col_codigo(df, COL_TOTAL_DESC_DT)) - liquido
+
+    # 2) Detalle por Tipo
+    calc_det = pd.Series(0.0, index=df.index)
+    sin_tipo = {}
+    for col in df.columns:
+        m = re.search(r"\((\d{4})\)\s*$", str(col))
+        if not m or m.group(1) in CODIGOS_NO_SUMAN or m.group(1)[0] not in "23":
+            continue
+        signo = TIPOS_SUMA.get(tipos_lre.get(m.group(1)))
+        if signo is None:
+            n = int((num(col) != 0).sum())
+            if n:
+                sin_tipo[col] = n
+            continue
+        calc_det += signo * num(col)
+    dif_det = calc_det - liquido
+
+    col_trab = _buscar_col_codigo(df, COL_DIAS_TRAB_DT)
+    valida = num(col_trab) != 0 if col_trab else pd.Series(True, index=df.index)
+
+    def serie(dif):
+        return pd.Series([int(round(d)) if v else None for d, v in zip(dif, valida)], index=df.index, dtype=object)
+
+    pos = df.columns.get_loc(col_liq)
+    df.insert(pos + 1, COL_DIF_LIQ_TOT, serie(dif_tot))
+    df.insert(pos + 2, COL_DIF_LIQ_DET, serie(dif_det))
+    df.attrs["cols_sin_tipo"] = sin_tipo
+    df.attrs["cuadratura_no_validados"] = int((~valida).sum())
+    return df
+
+
 def codigos_sin_match(df, col_codigo, col_resultado):
     """Códigos (únicos) cuya búsqueda quedó vacía, para avisar al usuario."""
     col = _buscar_col_codigo(df, col_codigo)
@@ -817,6 +908,14 @@ def generar_excel(df, filas_manuales=None):
             col_idx = list(df.columns).index(col_dato) + 1
             for pos in posiciones:
                 ws.cell(pos + 2, col_idx).fill = relleno_naranjo
+        # Cuadratura del Total líquido: diferencias fuera de tolerancia → celda en rojo claro
+        relleno_rojo = PatternFill("solid", fgColor=ROJO_CLARO)
+        for col_dif in (COL_DIF_LIQ_TOT, COL_DIF_LIQ_DET):
+            if col_dif in df.columns:
+                col_idx = list(df.columns).index(col_dif) + 1
+                for i, v in enumerate(pd.to_numeric(df[col_dif], errors="coerce").tolist(), start=2):
+                    if pd.notna(v) and abs(v) > TOLERANCIA_LIQ:
+                        ws.cell(i, col_idx).fill = relleno_rojo
         ws.row_dimensions[1].height = 45
         ws.freeze_panes = "D2"   # fija Mes de proceso, Rut trabajador y MpRut_entrada
     return output.getvalue()
@@ -844,6 +943,9 @@ class LogProceso:
 
     def advertencia(self, etapa, detalle, archivo=""):
         self._agregar("ADVERTENCIA", etapa, detalle, archivo)
+
+    def info(self, etapa, detalle, archivo=""):
+        self._agregar("INFO", etapa, detalle, archivo)
 
     def registros(self, df, mascara, problema, col_valor=None, etiqueta_valor=""):
         """Agrega al detalle cada fila del consolidado donde 'mascara' es True."""
@@ -882,8 +984,9 @@ class LogProceso:
                     ws.column_dimensions["E"].width = 90
                     ws.column_dimensions["F"].width = 60
                     rojo, amarillo = PatternFill("solid", fgColor="FDE2E2"), PatternFill("solid", fgColor="FEF3C7")
+                    verde = PatternFill("solid", fgColor=VERDE_CLARO)
                     for fila in ws.iter_rows(min_row=2):
-                        relleno = rojo if fila[1].value == "ERROR" else amarillo
+                        relleno = {"ERROR": rojo, "INFO": verde}.get(fila[1].value, amarillo)
                         for c in fila:
                             c.fill = relleno
                             c.alignment = Alignment(wrap_text=True, vertical="top")
@@ -1099,6 +1202,9 @@ def nombre_archivo_maestro(mes_desde, mes_hasta, meses_subidos):
 # ─────────────────────────────────────────────
 def main():
     st.set_page_config(page_title="Migración desde LRE DT", page_icon="🏛️", layout="wide")
+    from salir import boton_salir  # noqa: E402
+    boton_salir()
+
     st.title("🏛️ Migración desde LRE DT")
     st.caption("Etapa 1 — Armado del maestro: consolida los LRE descargados desde la DT y los completa con los datos de referencia.")
     log = LogProceso()
@@ -1108,6 +1214,10 @@ def main():
         instituciones = cargar_instituciones()
     except Exception as e:  # noqa: BLE001
         abortar(log, "Carga de Instituciones.xlsx", str(e), "Instituciones.xlsx", e)
+    try:
+        tipos_lre = cargar_equiv_conceptos()
+    except Exception as e:  # noqa: BLE001
+        abortar(log, "Carga de equiv_conceptos.xlsx", str(e), "equiv_conceptos.xlsx", e)
     with st.expander(
         "🏦 Instituciones cargadas (data/Instituciones.xlsx): "
         + " · ".join(f"{h} {len(d)}" for h, d in instituciones.items())
@@ -1214,6 +1324,10 @@ def main():
     manuales = {k: v for k, v in st.session_state.get(CLAVE_IMP_MANUAL, {}).items() if k in claves_pend}
     df_cons, filas_manuales = aplicar_manuales(df_cons, manuales)
     df_cons, filas_manuales = filtrar_rango(df_cons, en_rango, filas_manuales)
+    try:
+        df_cons = agregar_cuadratura_liquido(df_cons, tipos_lre)
+    except Exception as e:  # noqa: BLE001
+        abortar(log, "Cuadratura Total líquido (5501)", str(e), excepcion=e)
     meses = sorted(df_cons[COL_MES_PROCESO].unique())
 
     if faltan_csv:
@@ -1329,6 +1443,40 @@ def main():
             log.registros(df_cons, df_cons[col_nueva] == "",
                           f"Código {col_lre} no existe en Instituciones.xlsx hoja {hoja} ({col_nueva} vacía)",
                           col_orig, "Código: ")
+
+    # Cuadratura del Total líquido (5501)
+    formulas = {
+        COL_DIF_LIQ_TOT: "Totales DT (5210+5220+5230+5240−5301)",
+        COL_DIF_LIQ_DET: "Detalle por Tipo (Haber afecto + Haber exento − Descuento − Descuento Legal)",
+    }
+    for col_dif, formula in formulas.items():
+        dif = pd.to_numeric(df_cons[col_dif], errors="coerce")
+        malos = dif.abs() > TOLERANCIA_LIQ
+        if malos.any():
+            advertir(log, "Cuadratura Total líquido (5501)",
+                     f"{int(malos.sum())} registro(s) no cuadran: {formula} ≠ Total líquido (5501). "
+                     f"La diferencia está en {col_dif} (celdas en rojo en el Excel).")
+            log.registros(df_cons, malos, f"{formula} ≠ Total líquido (5501)", col_dif, "Diferencia: ")
+    validados = int(pd.to_numeric(df_cons[COL_DIF_LIQ_TOT], errors="coerce").notna().sum())
+    cuadran = all(
+        (lambda d: (d.isna() | (d.abs() <= TOLERANCIA_LIQ)).all())(pd.to_numeric(df_cons[c], errors="coerce"))
+        for c in formulas
+    )
+    if validados and cuadran:
+        msg = (f"Cuadratura del Total líquido (5501): {validados} registro(s) validados, "
+               f"todos cuadran con ambas fórmulas.")
+        st.success(f"✅ {msg}")
+        log.info("Cuadratura Total líquido (5501)", msg)
+    sin_tipo = df_cons.attrs.get("cols_sin_tipo", {})
+    if sin_tipo:
+        advertir(log, "Cuadratura Total líquido (5501)",
+                 "Columnas con montos que no están clasificadas en equiv_conceptos.xlsx (no entran en la "
+                 "cuadratura por detalle): **" + ", ".join(f"{c} ({n} reg.)" for c, n in sin_tipo.items()) + "**",
+                 archivo="equiv_conceptos.xlsx")
+    n_no_val = df_cons.attrs.get("cuadratura_no_validados", 0)
+    if n_no_val:
+        st.caption(f"ℹ️ Cuadratura del Total líquido: {n_no_val} registro(s) con días trabajados (1115) = 0 "
+                   f"no se validan ({COL_DIF_LIQ_TOT} y {COL_DIF_LIQ_DET} quedan vacías).")
 
     st.success(
         f"✅ **Maestro armado** — {len(df_cons)} registros — meses: **{', '.join(meses)}**"
