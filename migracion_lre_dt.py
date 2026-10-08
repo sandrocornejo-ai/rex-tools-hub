@@ -94,6 +94,12 @@ NARANJO_CLARO = "FCE4D6"                # celda ultImpSinLic_entrada ingresada m
 CLAVE_IMP_MANUAL = "imponibles_manuales"  # st.session_state: {rut normalizado: imponible}
 CODIGOS_REBAJA_LLSS = ["(3141)", "(3143)", "(3151)", "(3156)", "(3158)", "(3167)", "(3154)"]
 
+# Validación inicial de la Lista de conceptos (Rex+): estos aportes del empleador NO deben tener Código LRE
+CONCEPTOS_SIN_LRE = ["aporteAFPemp", "aporteFAPPCEV", "aporteFAPPBAC", "aportesegurocovid",
+                     "reliquidaAporteAFP", "reliquidaAporteCEV", "reliquidaAporteBAC"]
+COL_LC_CONCEPTO = "Concepto"
+COL_LC_CODIGO_LRE = "Código LRE"
+
 # Búsquedas simples en Instituciones.xlsx: (columna LRE, hoja, columna clave, campo a traer, columna nueva)
 BUSQUEDAS_INSTITUCIONES = [
     (COL_SALUD_DT, "SALUD", "salud_cod_dt", "salud_id_rex", COL_NOMBRE_SALUD),
@@ -361,6 +367,44 @@ def cargar_empresas(archivo):
     df["Cotización Mutual"] = pd.to_numeric(df["Cotización Mutual"].astype(str).str.replace(",", ".", regex=False),
                                             errors="coerce")
     return df.reset_index(drop=True)
+
+
+def cargar_lista_conceptos(archivo):
+    """Lee la Lista de conceptos exportada desde Rex+ (con o sin fila de título arriba del encabezado)."""
+    df = _leer_excel_con_encabezado(archivo, [COL_LC_CONCEPTO, COL_LC_CODIGO_LRE])
+    df.columns = [str(c).strip() for c in df.columns]
+    df[COL_LC_CONCEPTO] = df[COL_LC_CONCEPTO].astype(str).str.strip()
+    return df.reset_index(drop=True)
+
+
+def validar_conceptos_sin_lre(lista):
+    """
+    Busca en la columna Concepto los aportes del empleador de CONCEPTOS_SIN_LRE y revisa la columna Código LRE.
+    Retorna (con_codigo, no_encontrados): con_codigo = DataFrame de los que SÍ tienen Código LRE (no debería pasar),
+    no_encontrados = conceptos que no aparecen en la lista.
+    """
+    sub = lista[lista[COL_LC_CONCEPTO].isin(CONCEPTOS_SIN_LRE)].copy()
+    codigo = sub[COL_LC_CODIGO_LRE].map(lambda v: "" if pd.isna(v) else str(v).strip())
+    con_codigo = sub[codigo.ne("") & codigo.str.lower().ne("nan")]
+    cols = [c for c in (COL_LC_CONCEPTO, "Nombre", "Tipo", COL_LC_CODIGO_LRE) if c in sub.columns]
+    con_codigo = con_codigo[cols].reset_index(drop=True)
+    no_encontrados = [c for c in CONCEPTOS_SIN_LRE if c not in set(sub[COL_LC_CONCEPTO])]
+    return con_codigo, no_encontrados
+
+
+def excel_conceptos_con_lre(df):
+    """Excel descargable con los conceptos que tienen Código LRE asignado."""
+    output = io.BytesIO()
+    with pd.ExcelWriter(output, engine="openpyxl") as writer:
+        df.to_excel(writer, index=False, sheet_name="Conceptos con Código LRE")
+        ws = writer.sheets["Conceptos con Código LRE"]
+        for celda in ws[1]:
+            celda.fill = PatternFill("solid", fgColor="C53030")
+            celda.font = Font(bold=True, color="FFFFFF", size=10)
+        for col, ancho in zip("ABCD", (24, 48, 20, 60)):
+            ws.column_dimensions[col].width = ancho
+        ws.freeze_panes = "A2"
+    return output.getvalue()
 
 
 def buscar_institucion(tablas, hoja, cod_dt, campo):
@@ -1239,6 +1283,11 @@ def main():
             "2️⃣ Listado de empleados (Rex+)", type=["xlsx"], key="up_empleados",
             help="Se busca por Rut + Fecha inicio contrato para traer Empresa (col. BG) y Contrato (col. BE).",
         )
+        archivo_lista = st.file_uploader(
+            "6️⃣ Lista de conceptos (Rex+)", type=["xlsx"], key="up_lista_conceptos",
+            help="Se valida que los aportes del empleador (aporteAFPemp, aporteFAPPCEV, aporteFAPPBAC, "
+                 "aportesegurocovid y sus reliquidaciones) no tengan Código LRE.",
+        )
     with col2:
         archivo_empresas = st.file_uploader("3️⃣ Listado de empresas (Rex+)", type=["xlsx"], key="up_empresas")
         archivo_cot_hist = st.file_uploader(
@@ -1253,7 +1302,8 @@ def main():
     faltantes = [n for n, f in [("Archivos CSV de la DT", archivos), ("Listado de empleados", archivo_empleados),
                                 ("Listado de empresas", archivo_empresas),
                                 ("Cotizaciones históricas AFP y SIS", archivo_cot_hist),
-                                ("Parámetros mensuales", archivo_parametros)] if not f]
+                                ("Parámetros mensuales", archivo_parametros),
+                                ("Lista de conceptos", archivo_lista)] if not f]
     if faltantes:
         st.info("Esperando archivos: " + ", ".join(f"**{n}**" for n in faltantes))
         return
@@ -1264,6 +1314,7 @@ def main():
         empresas = _leer_con_nombre(cargar_empresas, archivo_empresas)
         cot_afp_hist = _leer_con_nombre(cargar_cot_afp_hist, archivo_cot_hist)
         parametros = _leer_con_nombre(cargar_parametros, archivo_parametros)
+        lista_conceptos = _leer_con_nombre(cargar_lista_conceptos, archivo_lista)
     except Exception as e:  # noqa: BLE001
         abortar(log, "Lectura de archivos de referencia",
                 f"No se pudo leer el archivo: {e}", getattr(e, "archivo_origen", ""), e)
@@ -1274,6 +1325,34 @@ def main():
         + f") · 🏢 Empresas: {len(empresas)} · 📈 Cotizaciones AFP/SIS: {len(cot_afp_hist)}"
         + f" · 📅 Parámetros: {len(parametros)} meses"
     )
+
+    # Validación inicial: aportes del empleador sin Código LRE en la Lista de conceptos
+    con_codigo, no_encontrados = validar_conceptos_sin_lre(lista_conceptos)
+    if con_codigo.empty:
+        st.success(f"✅ **Lista de conceptos:** ninguno de los {len(CONCEPTOS_SIN_LRE)} aportes del empleador "
+                   f"revisados tiene Código LRE asignado (lo esperado).")
+        log.info("Validación Lista de conceptos",
+                 "Ningún aporte del empleador revisado tiene Código LRE: " + ", ".join(CONCEPTOS_SIN_LRE),
+                 archivo_lista.name)
+    else:
+        st.error(f"❌ **Lista de conceptos:** {len(con_codigo)} aporte(s) del empleador tienen Código LRE asignado "
+                 f"y no deberían tenerlo: **{', '.join(con_codigo[COL_LC_CONCEPTO])}**.")
+        st.dataframe(con_codigo, use_container_width=True, hide_index=True)
+        st.download_button(
+            "⬇️ Descargar conceptos con Código LRE (.xlsx)",
+            data=excel_conceptos_con_lre(con_codigo),
+            file_name=f"conceptos_con_codigo_lre_{datetime.now():%Y%m%d_%H%M%S}.xlsx",
+            mime="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet",
+            key="dl_conceptos_lre",
+        )
+        for _, fila in con_codigo.iterrows():
+            log.error("Validación Lista de conceptos",
+                      f"{fila[COL_LC_CONCEPTO]} tiene Código LRE '{fila[COL_LC_CODIGO_LRE]}' y no debería tenerlo.",
+                      archivo_lista.name)
+    if no_encontrados:
+        advertir(log, "Validación Lista de conceptos",
+                 f"Conceptos que no aparecen en la Lista de conceptos: **{', '.join(no_encontrados)}**.",
+                 archivo=archivo_lista.name)
 
     # 1) Validar nombres — si uno falla, se aborta todo
     validos, invalidos = validar_nombres(archivos)
