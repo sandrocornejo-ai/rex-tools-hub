@@ -782,7 +782,7 @@ def calcular_ult_imp_sin_lic(df):
     """
     Último mes imponible sin licencia, por registro:
       - Si el registro tiene licencia (1116 > 0): se busca el mismo Rut en el mes anterior; si ese mes
-        no tiene licencia (1116 = 0) → min(5210, topeimp_entrada) de ese mes. Si también tiene licencia,
+        no tiene licencia (1116 = 0) → min(5210 + 5220, topeimp_entrada) de ese mes. Si también tiene licencia,
         o el Rut no aparece ese mes, se sigue hacia atrás.
         Si no se encuentra ninguno → min(sueldoContrato_entrada, topeimp_entrada) del mismo registro.
         Si el sueldo tampoco se encontró ('sueldo no encontrado') → 'imponible no encontrado'
@@ -792,14 +792,16 @@ def calcular_ult_imp_sin_lic(df):
     col_rut = _buscar_col_rut(df)
     col_lic = _buscar_col_codigo(df, COL_DIAS_LIC_DT)
     col_imp = _buscar_col_codigo(df, COL_IMP_TRIB_DT)
-    for c, n in ((col_lic, "1116"), (col_imp, "5210")):
+    col_imp_nt = _buscar_col_codigo(df, COL_IMP_NO_TRIB_DT)
+    for c, n in ((col_lic, "1116"), (col_imp, "5210"), (col_imp_nt, "5220")):
         if c is None:
             raise ErrorArchivo(f"No se encontró la columna ({n}) para calcular {COL_ULT_IMP_SIN_LIC}.")
     rut = df[col_rut].map(normalizar_rut)
     dias_lic = pd.to_numeric(df[col_lic], errors="coerce").fillna(0)
-    imponible = pd.to_numeric(df[col_imp], errors="coerce").fillna(0)
+    imponible = (pd.to_numeric(df[col_imp], errors="coerce").fillna(0)
+                 + pd.to_numeric(df[col_imp_nt], errors="coerce").fillna(0))   # 5210 + 5220
     tope = pd.to_numeric(df["topeimp_entrada"], errors="coerce")
-    valor_mes = imponible.where(tope.isna(), imponible.clip(upper=tope))   # min(5210, tope)
+    valor_mes = imponible.where(tope.isna(), imponible.clip(upper=tope))   # min(5210 + 5220, tope)
 
     # Por Rut y mes: primer registro del mes (días de licencia y valor)
     historia = {}
