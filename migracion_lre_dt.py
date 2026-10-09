@@ -113,9 +113,13 @@ COL_FECHA_INI_DT = "(1102)"             # 'Fecha inicio contrato(1102)'
 COL_EMPRESA = "Empresa_entrada"         # listado_empleados: columna BG (Empresa)
 COL_NUM_CONTRATO = "Numcontrato_entrada"  # listado_empleados: columna BE (Contrato)
 COL_HORAS_SEM = "horasSema_entrada"     # listado_empleados: Horas Semanales (col. CE), misma búsqueda Rut + Fecha inicio
+COL_TIPO_CONTRATO = "tipo_cont_entrada"         # listado_empleados: 'Tipo contr.', misma búsqueda Rut + Fecha inicio
+COL_CAMBIO_INDEF = "fecha_camIndef_entrada"      # listado_empleados: 'Cambio a Indefin.' (fecha dd/mm/aaaa), misma búsqueda
+# Columnas opcionales del listado de empleados (por nombre de encabezado) → (nombre interno, columna del maestro)
+COLUMNAS_OPC_EMPLEADOS = [("Tipo contr.", COL_TIPO_CONTRATO), ("Cambio a Indefin.", COL_CAMBIO_INDEF)]
 COL_ID_EMPRESA = "idEmpresa_entrada"    # listado_empresas: Empresa (código), buscando Empresa_entrada en Nombre
 
-COLUMNAS_NUEVAS = [COL_MP_RUT, COL_ID_EMPRESA, COL_EMPRESA, COL_NUM_CONTRATO, COL_HORAS_SEM, COL_NOMBRE_AFP, COL_PORC_AFP, COL_SIS,
+COLUMNAS_NUEVAS = [COL_MP_RUT, COL_ID_EMPRESA, COL_EMPRESA, COL_NUM_CONTRATO, COL_TIPO_CONTRATO, COL_CAMBIO_INDEF, COL_HORAS_SEM, COL_NOMBRE_AFP, COL_PORC_AFP, COL_SIS,
                    COL_NOMBRE_SALUD, COL_NOMBRE_CAJA, COL_NOMBRE_MUTUAL, COL_PORC_MUTUAL] \
                   + [nueva for _, nueva in PARAMETROS_A_TRAER] + [COL_REBAJA_LLSS, COL_ULT_IMP_SIN_LIC, COL_IMP_MES_ANT_LIC, COL_IMPONIBLE_LIC, COL_SUELDO_CONTRATO]
 COLUMNAS_TASA = [COL_PORC_AFP, COL_SIS, COL_PORC_MUTUAL]  # en porcentaje (x 100), 2 decimales en el Excel
@@ -331,10 +335,23 @@ def cargar_empleados(archivo):
         "Contrato": df[col_con],
         "Horas Semanales": df[col_horas],
     })
+    usadas = {"Rut": col_rut, "Fecha inicio": col_ini, "Empresa (BG)": col_emp,
+              "Contrato (BE)": col_con, "Horas Semanales": col_horas}
+    # Columnas opcionales por nombre de encabezado (sin distinguir mayúsculas, espacios ni puntos)
+    def _norm(t):
+        return re.sub(r"[\s.]+", "", str(t)).lower()
+    faltantes = []
+    for nombre, _ in COLUMNAS_OPC_EMPLEADOS:
+        col = next((c for c in df.columns if _norm(c) == _norm(nombre)), None)
+        if col is None:
+            out[nombre] = None
+            faltantes.append(nombre)
+        else:
+            out[nombre] = df[col].values
+            usadas[nombre] = col
     out = out[out["clave"] != ""].reset_index(drop=True)
-    out.attrs["columnas_usadas"] = {"Rut": col_rut, "Fecha inicio": col_ini,
-                                    "Empresa (BG)": col_emp, "Contrato (BE)": col_con,
-                                    "Horas Semanales": col_horas}
+    out.attrs["columnas_usadas"] = usadas
+    out.attrs["columnas_faltantes"] = faltantes
     return out
 
 
@@ -602,7 +619,13 @@ def agregar_columnas_nuevas(df, instituciones, cot_afp_hist, empleados, empresas
         num_contrato = num_contrato_num.astype("Int64")
     df.insert(pos + 2, COL_NUM_CONTRATO, num_contrato)
     horas = pd.to_numeric(clave_emp.map(emp_unicos["Horas Semanales"]), errors="coerce")
-    df.insert(pos + 3, COL_HORAS_SEM, horas.round(2) if (horas.dropna() % 1 != 0).any() else horas.astype("Int64"))
+    # tipo_cont_entrada (texto tal cual) y fecha_camIndef_entrada (fecha dd/mm/aaaa), después de Numcontrato_entrada;
+    # vacías si no hay coincidencia
+    tipo = clave_emp.map(emp_unicos["Tipo contr."])
+    df.insert(pos + 3, COL_TIPO_CONTRATO, tipo.map(lambda v: "" if pd.isna(v) else str(v).strip()))
+    cambio = clave_emp.map(emp_unicos["Cambio a Indefin."])
+    df.insert(pos + 4, COL_CAMBIO_INDEF, cambio.map(normalizar_fecha))
+    df.insert(pos + 5, COL_HORAS_SEM, horas.round(2) if (horas.dropna() % 1 != 0).any() else horas.astype("Int64"))
     df.attrs["empleados_sin_match"] = sorted(clave_emp[df[COL_EMPRESA] == ""].unique().tolist())
     df.attrs["empleados_duplicados"] = sorted(empleados.loc[empleados["clave"].duplicated(), "clave"].unique().tolist())
 
@@ -1374,6 +1397,10 @@ def main():
         abortar(log, "Lectura de archivos de referencia",
                 f"No se pudo leer el archivo: {e}", getattr(e, "archivo_origen", ""), e)
     usadas = empleados.attrs.get("columnas_usadas", {})
+    for faltante in empleados.attrs.get("columnas_faltantes", []):
+        advertir(log, "Lectura de archivos de referencia",
+                 f"El listado de empleados no tiene la columna **'{faltante}'**; la columna del maestro "
+                 f"correspondiente quedará vacía.", archivo=getattr(archivo_empleados, "name", ""))
     st.caption(
         f"👥 Empleados: {len(empleados)} registros (columnas usadas: "
         + ", ".join(f"{k} → '{v}'" for k, v in usadas.items())
@@ -1490,7 +1517,7 @@ def main():
     if emp_sin:
         advertir(log, "Cruce con listado de empleados",
                  f"{len(emp_sin)} combinación(es) Rut + Fecha inicio contrato no están en el listado de empleados — "
-                 f"{COL_EMPRESA} y {COL_NUM_CONTRATO} quedaron vacías: **{', '.join(emp_sin[:10])}**"
+                 f"{COL_EMPRESA}, {COL_NUM_CONTRATO}, {COL_HORAS_SEM}, {COL_TIPO_CONTRATO} y {COL_CAMBIO_INDEF} quedaron vacías: **{', '.join(emp_sin[:10])}**"
                  f"{' …' if len(emp_sin) > 10 else ''}",
                  f"{len(emp_sin)} combinación(es) Rut + Fecha inicio no encontradas: {', '.join(emp_sin)}",
                  archivo_empleados.name)
