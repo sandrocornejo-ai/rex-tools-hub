@@ -1427,7 +1427,8 @@ def main():
     boton_salir()
 
     st.title("🏛️ Migración desde LRE DT")
-    st.caption("Etapa 1 — Armado del maestro: consolida los LRE descargados desde la DT y los completa con los datos de referencia.")
+    st.caption("Etapa 1 — Armado del maestro: consolida los LRE descargados desde la DT y los completa con los datos de referencia. "
+               "Etapa 2 — Creación de archivo de carga de liquidaciones (al final de la página).")
     log = LogProceso()
 
     # Tabla fija de instituciones (data/Instituciones.xlsx)
@@ -1790,6 +1791,10 @@ def main():
         file_name=nombre_archivo_maestro(mes_desde, mes_hasta, meses_subidos),
         mime="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet",
     )
+    # Etapa 2 — Creación de archivo de carga de liquidaciones (migracion_lre_dt_etapa2.py)
+    from migracion_lre_dt_etapa2 import seccion_etapa2  # noqa: E402  (import tardío: evita import circular)
+    seccion_etapa2(df_cons, con_codigo, log, mes_desde, mes_hasta)
+
     boton_log(log, "dt_log_final")
 
 

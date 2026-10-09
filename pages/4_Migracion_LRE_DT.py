@@ -1,6 +1,6 @@
 """
 Rex+ Tools · 4 — Migración desde LRE DT
-Etapa 1: Armado del maestro. El programa vive en migracion_lre_dt.py (raíz del repo);
+Etapa 1: Armado del maestro (migracion_lre_dt.py) y Etapa 2: archivo de carga (migracion_lre_dt_etapa2.py);
 esta página solo lo ejecuta dentro de Rex+ Tools.
 """
 import os
