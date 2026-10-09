@@ -134,11 +134,16 @@ COLUMNAS_NUEVAS += [COL_DIF_LIQ_TOT, COL_DIF_LIQ_DET, COL_IMPO_VALIDADO, COL_BAS
 
 # Desglose del AFC - Aporte empleador (4151) — van inmediatamente después de la columna 4151
 COL_AFC_EMPLEADOR_DT = "(4151)"
-COL_FACTOR_CES = "factor_ces_entrada"          # 2.4 contrato indefinido ("I"); 2.8 plazo fijo ("F") u obra ("O")
+COL_FACTOR_CES = "factor_ces_entrada"          # 2.4 contrato indefinido ("I"); 3 plazo fijo ("F") u obra ("O")
 COL_BASE_CES_CALC = "base_ces_calc_entrada"    # round(4151 × 100 / factor_ces_entrada)
+COL_CES_APORTE_CI = "cesAporteCi"              # base_ces_calc_entrada × tasa CI (1,6% si factor 2,4; 2,8% si factor 3)
+COL_CES_APORTE_SOL = "cesAporteSol"            # base_ces_calc_entrada × tasa Sol (0,8% si factor 2,4; 0,2% si factor 3)
 FACTOR_CES_INDEFINIDO = 2.4
-FACTOR_CES_PLAZO_FIJO = 2.8
-COLUMNAS_NUEVAS += [COL_FACTOR_CES, COL_BASE_CES_CALC]
+FACTOR_CES_PLAZO_FIJO = 3
+# factor → (tasa cuenta individual %, tasa fondo solidario %)
+TASAS_CES_POR_FACTOR = {FACTOR_CES_INDEFINIDO: (1.6, 0.8), FACTOR_CES_PLAZO_FIJO: (2.8, 0.2)}
+TOLERANCIA_CES = 1   # ± pesos en la validación 4151 = cesAporteCi + cesAporteSol
+COLUMNAS_NUEVAS += [COL_FACTOR_CES, COL_BASE_CES_CALC, COL_CES_APORTE_CI, COL_CES_APORTE_SOL]
 TIPOS_SUMA = {"Haber afecto": 1, "Haber exento": 1, "Descuento": -1, "Descuento Legal": -1}
 CODIGOS_NO_SUMAN = {"5501", "3164", "3167"}  # 5501 = control · 3164 informativo · 3167 rebaja zona extrema
 TOLERANCIA_LIQ = 1
@@ -734,7 +739,38 @@ def agregar_columnas_nuevas(df, instituciones, cot_afp_hist, empleados, empresas
     pos = df.columns.get_loc(col_4151)
     df.insert(pos + 1, COL_FACTOR_CES, factor)
     df.insert(pos + 2, COL_BASE_CES_CALC, calcular_base_ces(df, col_4151))
+    ci, sol = calcular_ces_aportes(df)
+    df.insert(pos + 3, COL_CES_APORTE_CI, ci)
+    df.insert(pos + 4, COL_CES_APORTE_SOL, sol)
     return df
+
+
+def calcular_ces_aportes(df):
+    """
+    Desglose del 4151 a partir de base_ces_calc_entrada (enteros, redondeo al peso):
+      - factor 2,4 → cesAporteCi = base × 1,6/100 ; cesAporteSol = base × 0,8/100
+      - factor 3   → cesAporteCi = base × 2,8/100 ; cesAporteSol = base × 0,2/100
+      - sin factor → ambos vacíos
+    """
+    ci, sol = [], []
+    for b, f in zip(df[COL_BASE_CES_CALC], df[COL_FACTOR_CES]):
+        tasas = None if f is None or pd.isna(f) else TASAS_CES_POR_FACTOR.get(f)
+        if tasas is None or b is None or pd.isna(b):
+            ci.append(None)
+            sol.append(None)
+        else:
+            ci.append(int(round(b * tasas[0] / 100)))
+            sol.append(int(round(b * tasas[1] / 100)))
+    return pd.Series(ci, index=df.index, dtype=object), pd.Series(sol, index=df.index, dtype=object)
+
+
+def diferencia_ces(df):
+    """4151 − (cesAporteCi + cesAporteSol). Vacío si no hay desglose."""
+    col_4151 = _buscar_col_codigo(df, COL_AFC_EMPLEADOR_DT)
+    monto = pd.to_numeric(df[col_4151], errors="coerce").fillna(0)
+    ci = pd.to_numeric(df[COL_CES_APORTE_CI], errors="coerce")
+    sol = pd.to_numeric(df[COL_CES_APORTE_SOL], errors="coerce")
+    return monto - (ci + sol)
 
 
 def calcular_factor_ces(df):
@@ -742,9 +778,9 @@ def calcular_factor_ces(df):
     factor_ces_entrada según tipo_cont_entrada:
       - "I" (indefinido)            → 2.4
           · salvo que fecha_camIndef_entrada tenga fecha y el Mes de proceso (aaaa-mm) sea ANTERIOR al
-            mes-año de esa fecha: en ese mes el contrato aún era a plazo/obra → 2.8
+            mes-año de esa fecha: en ese mes el contrato aún era a plazo/obra → 3
             (el mismo mes del cambio ya usa 2.4)
-      - "F" (plazo fijo) / "O" (obra o faena) → 2.8
+      - "F" (plazo fijo) / "O" (obra o faena) → 3
       - vacío u otro valor → vacío (se informa en el log)
     """
     resultado = []
@@ -1088,6 +1124,15 @@ def generar_excel(df, filas_manuales=None):
                 for i, v in enumerate(pd.to_numeric(df[col_dif], errors="coerce").tolist(), start=2):
                     if pd.notna(v) and abs(v) > TOLERANCIA_LIQ:
                         ws.cell(i, col_idx).fill = relleno_rojo
+        # Validación 4151 = cesAporteCi + cesAporteSol: si no cuadra → ambas celdas en rojo claro
+        if COL_CES_APORTE_CI in df.columns and COL_CES_APORTE_SOL in df.columns:
+            dif_ces = diferencia_ces(df)
+            idx_ci = list(df.columns).index(COL_CES_APORTE_CI) + 1
+            idx_sol = list(df.columns).index(COL_CES_APORTE_SOL) + 1
+            for i, v in enumerate(dif_ces.tolist(), start=2):
+                if pd.notna(v) and abs(v) > TOLERANCIA_CES:
+                    ws.cell(i, idx_ci).fill = relleno_rojo
+                    ws.cell(i, idx_sol).fill = relleno_rojo
         ws.row_dimensions[1].height = 45
         ws.freeze_panes = "D2"   # fija Mes de proceso, Rut trabajador y MpRut_entrada
     return output.getvalue()
@@ -1697,6 +1742,25 @@ def main():
                  "Columnas con montos que no están clasificadas en equiv_conceptos.xlsx (no entran en la "
                  "cuadratura por detalle): **" + ", ".join(f"{c} ({n} reg.)" for c, n in sin_tipo.items()) + "**",
                  archivo="equiv_conceptos.xlsx")
+    # Validación del desglose del AFC aporte empleador: 4151 = cesAporteCi + cesAporteSol
+    if COL_CES_APORTE_CI in df_cons.columns:
+        dif_ces = diferencia_ces(df_cons)
+        validados_ces = int(dif_ces.notna().sum())
+        malos_ces = dif_ces.notna() & (dif_ces.abs() > TOLERANCIA_CES)
+        if malos_ces.any():
+            advertir(log, "Desglose AFC aporte empleador (4151)",
+                     f"{int(malos_ces.sum())} registro(s) no cuadran: {COL_CES_APORTE_CI} + {COL_CES_APORTE_SOL} ≠ "
+                     f"AFC - Aporte empleador (4151) (celdas en rojo en el Excel).")
+            df_cons["_dif_ces"] = dif_ces
+            log.registros(df_cons, malos_ces, f"{COL_CES_APORTE_CI} + {COL_CES_APORTE_SOL} ≠ 4151",
+                          "_dif_ces", "Diferencia: ")
+            df_cons.drop(columns="_dif_ces", inplace=True)
+        elif validados_ces:
+            msg = (f"Desglose AFC aporte empleador (4151): {validados_ces} registro(s) validados, "
+                   f"todos cuadran ({COL_CES_APORTE_CI} + {COL_CES_APORTE_SOL} = 4151).")
+            st.success(f"✅ {msg}")
+            log.info("Desglose AFC aporte empleador (4151)", msg)
+
     n_no_val = df_cons.attrs.get("cuadratura_no_validados", 0)
     if n_no_val:
         st.caption(f"ℹ️ Cuadratura del Total líquido: {n_no_val} registro(s) con días trabajados (1115) = 0 "
