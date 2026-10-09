@@ -66,6 +66,7 @@ PARAMETROS_A_TRAER = [                  # (columna en parametrosMesuales, column
     ("aporteFAPPBAC",       "aporteFappbac_entrada"),
 ]
 COL_REBAJA_LLSS = "rebajallss_entrada"
+COL_IMPO_VALIDADO = "impo_validado_entrada"   # min(5210 + 5220, topeimp_entrada); va justo después de (5565)
 
 # Último mes imponible sin licencia (va después de 'Nro días de licencia médica en el mes(1116)')
 COL_DIAS_LIC_DT = "(1116)"
@@ -124,7 +125,7 @@ COL_TOTAL_DESC_DT = "(5301)"
 CODIGOS_HABERES_TOT = ["(5210)", "(5220)", "(5230)", "(5240)"]
 COL_DIF_LIQ_TOT = "difLiqTotales_entrada"    # (5210+5220+5230+5240) − 5301 − 5501
 COL_DIF_LIQ_DET = "difLiqDetalle_entrada"    # (Haber afecto + Haber exento) − (Descuento + Descuento Legal) − 5501
-COLUMNAS_NUEVAS += [COL_DIF_LIQ_TOT, COL_DIF_LIQ_DET]
+COLUMNAS_NUEVAS += [COL_DIF_LIQ_TOT, COL_DIF_LIQ_DET, COL_IMPO_VALIDADO]
 TIPOS_SUMA = {"Haber afecto": 1, "Haber exento": 1, "Descuento": -1, "Descuento Legal": -1}
 CODIGOS_NO_SUMAN = {"5501", "3164", "3167"}  # 5501 = control · 3164 informativo · 3167 rebaja zona extrema
 TOLERANCIA_LIQ = 1
@@ -573,6 +574,7 @@ def agregar_columnas_nuevas(df, instituciones, cot_afp_hist, empleados, empresas
       - Porcmutual_entrada : 'Cotización Mutual' de listado_empresas, buscando Empresa_entrada en la
                            columna Nombre (o, si no está, en Empresa); va después de nombreMUTUALa_entrada.
       - Después de Total indemnizaciones no tributables(5565), en orden:
+          impo_validado_entrada → min(5210 + 5220, topeimp_entrada)
           topeimp_entrada, topeces_entrada, topesalud_entrada, porcAportecaja_entrada,
           aporteAfp_entrada, aporteExpvida_entrada, aporteFappbac_entrada  → Parámetros mensuales por Mes de proceso
           rebajallss_entrada → 3141 + 3143 + 3151 + 3156 + 3158 + 3167 + 3154
@@ -670,6 +672,9 @@ def agregar_columnas_nuevas(df, instituciones, cot_afp_hist, empleados, empresas
     rebaja = df[cols_rebaja].apply(pd.to_numeric, errors="coerce").fillna(0).sum(axis=1)
     df.insert(pos + len(PARAMETROS_A_TRAER) + 1, COL_REBAJA_LLSS, rebaja.round(0).astype("Int64"))
 
+    # impo_validado_entrada: min(5210 + 5220, topeimp_entrada); va justo después de (5565)
+    df.insert(pos + 1, COL_IMPO_VALIDADO, calcular_impo_validado(df))
+
     # sueldoContrato_entrada
     df.insert(df.columns.get_loc(_buscar_col_codigo(df, COL_TASA_IND_DT)) + 1, COL_SUELDO_CONTRATO,
               calcular_sueldo_contrato(df))
@@ -684,6 +689,24 @@ def agregar_columnas_nuevas(df, instituciones, cot_afp_hist, empleados, empresas
     # imponibleLic_entrada
     df.insert(df.columns.get_loc(COL_IMP_MES_ANT_LIC) + 1, COL_IMPONIBLE_LIC, calcular_imponible_lic(df))
     return df
+
+
+def calcular_impo_validado(df):
+    """
+    impo_validado_entrada = min(Total haberes imponibles y tributables(5210)
+                                + Total haberes imponibles no tributables(5220), topeimp_entrada)  (entero).
+      - Si topeimp_entrada viene vacío (mes sin parámetros) → 5210 + 5220 sin tope.
+    """
+    cols = {}
+    for cod in (COL_IMP_TRIB_DT, COL_IMP_NO_TRIB_DT):
+        cols[cod] = _buscar_col_codigo(df, cod)
+        if cols[cod] is None:
+            raise ErrorArchivo(f"No se encontró la columna {cod} para calcular {COL_IMPO_VALIDADO}.")
+    imponible = (pd.to_numeric(df[cols[COL_IMP_TRIB_DT]], errors="coerce").fillna(0)
+                 + pd.to_numeric(df[cols[COL_IMP_NO_TRIB_DT]], errors="coerce").fillna(0))
+    tope = pd.to_numeric(df["topeimp_entrada"], errors="coerce")
+    valor = imponible.where(tope.isna(), imponible.clip(upper=tope))
+    return valor.round(0).astype("Int64")
 
 
 def calcular_imponible_lic(df):
