@@ -131,6 +131,14 @@ CODIGOS_HABERES_TOT = ["(5210)", "(5220)", "(5230)", "(5240)"]
 COL_DIF_LIQ_TOT = "difLiqTotales_entrada"    # (5210+5220+5230+5240) − 5301 − 5501
 COL_DIF_LIQ_DET = "difLiqDetalle_entrada"    # (Haber afecto + Haber exento) − (Descuento + Descuento Legal) − 5501
 COLUMNAS_NUEVAS += [COL_DIF_LIQ_TOT, COL_DIF_LIQ_DET, COL_IMPO_VALIDADO, COL_BASECES_VALIDADO]
+
+# Desglose del AFC - Aporte empleador (4151) — van inmediatamente después de la columna 4151
+COL_AFC_EMPLEADOR_DT = "(4151)"
+COL_FACTOR_CES = "factor_ces_entrada"          # 2.4 contrato indefinido ("I"); 2.8 plazo fijo ("F") u obra ("O")
+COL_BASE_CES_CALC = "base_ces_calc_entrada"    # round(4151 × 100 / factor_ces_entrada)
+FACTOR_CES_INDEFINIDO = 2.4
+FACTOR_CES_PLAZO_FIJO = 2.8
+COLUMNAS_NUEVAS += [COL_FACTOR_CES, COL_BASE_CES_CALC]
 TIPOS_SUMA = {"Haber afecto": 1, "Haber exento": 1, "Descuento": -1, "Descuento Legal": -1}
 CODIGOS_NO_SUMAN = {"5501", "3164", "3167"}  # 5501 = control · 3164 informativo · 3167 rebaja zona extrema
 TOLERANCIA_LIQ = 1
@@ -717,7 +725,53 @@ def agregar_columnas_nuevas(df, instituciones, cot_afp_hist, empleados, empresas
     df.insert(df.columns.get_loc(col_ultima) + 1, COL_IMPO_VALIDADO, calcular_impo_validado(df))
     df.insert(df.columns.get_loc("topeces_entrada") + 1, COL_BASECES_VALIDADO,
               calcular_impo_validado(df, "topeces_entrada", COL_BASECES_VALIDADO))
+
+    # factor_ces_entrada y base_ces_calc_entrada: inmediatamente después de AFC - Aporte empleador(4151)
+    col_4151 = _buscar_col_codigo(df, COL_AFC_EMPLEADOR_DT)
+    if col_4151 is None:
+        raise ErrorArchivo("No se encontró la columna AFC - Aporte empleador (4151).")
+    factor = calcular_factor_ces(df)
+    pos = df.columns.get_loc(col_4151)
+    df.insert(pos + 1, COL_FACTOR_CES, factor)
+    df.insert(pos + 2, COL_BASE_CES_CALC, calcular_base_ces(df, col_4151))
     return df
+
+
+def calcular_factor_ces(df):
+    """
+    factor_ces_entrada según tipo_cont_entrada:
+      - "I" (indefinido)            → 2.4
+          · salvo que fecha_camIndef_entrada tenga fecha y el Mes de proceso (aaaa-mm) sea ANTERIOR al
+            mes-año de esa fecha: en ese mes el contrato aún era a plazo/obra → 2.8
+            (el mismo mes del cambio ya usa 2.4)
+      - "F" (plazo fijo) / "O" (obra o faena) → 2.8
+      - vacío u otro valor → vacío (se informa en el log)
+    """
+    resultado = []
+    for tipo, fecha, mes in zip(df[COL_TIPO_CONTRATO], df[COL_CAMBIO_INDEF], df[COL_MES_PROCESO]):
+        t = "" if pd.isna(tipo) else str(tipo).strip().upper()
+        if t == "I":
+            f = FACTOR_CES_INDEFINIDO
+            fecha_txt = "" if pd.isna(fecha) else str(fecha).strip()
+            m_ = re.fullmatch(r"\d{2}/(\d{2})/(\d{4})", fecha_txt)
+            if m_ and str(mes) < f"{m_.group(2)}-{m_.group(1)}":
+                f = FACTOR_CES_PLAZO_FIJO
+            resultado.append(f)
+        elif t in ("F", "O"):
+            resultado.append(FACTOR_CES_PLAZO_FIJO)
+        else:
+            resultado.append(None)
+    return pd.Series(resultado, index=df.index, dtype=object)
+
+
+def calcular_base_ces(df, col_4151):
+    """base_ces_calc_entrada = round(AFC - Aporte empleador(4151) × 100 / factor_ces_entrada), entero.
+    Vacía si el factor está vacío."""
+    monto = pd.to_numeric(df[col_4151], errors="coerce").fillna(0)
+    resultado = []
+    for v, f in zip(monto, df[COL_FACTOR_CES]):
+        resultado.append(None if f is None or pd.isna(f) else int(round(v * 100 / f)))
+    return pd.Series(resultado, index=df.index, dtype=object)
 
 
 def calcular_impo_validado(df, col_tope="topeimp_entrada", col_resultado=COL_IMPO_VALIDADO):
@@ -1513,6 +1567,15 @@ def main():
                  f"se usó la primera: **{', '.join(emp_dup[:10])}**{' …' if len(emp_dup) > 10 else ''}",
                  f"{len(emp_dup)} combinación(es) Rut + Fecha inicio repetidas (se usó la primera): {', '.join(emp_dup)}",
                  archivo_empleados.name)
+    sin_factor = df_cons[COL_FACTOR_CES].isna() if COL_FACTOR_CES in df_cons.columns else pd.Series(False, index=df_cons.index)
+    if sin_factor.any():
+        advertir(log, "Desglose AFC aporte empleador (4151)",
+                 f"{int(sin_factor.sum())} registro(s) sin tipo de contrato válido (I, F u O) en {COL_TIPO_CONTRATO} — "
+                 f"{COL_FACTOR_CES} y {COL_BASE_CES_CALC} quedaron vacías.")
+        log.registros(df_cons, sin_factor,
+                      f"{COL_TIPO_CONTRATO} vacío o distinto de I/F/O ({COL_FACTOR_CES} y {COL_BASE_CES_CALC} vacías)",
+                      COL_TIPO_CONTRATO, "Tipo contrato: ")
+
     emp_sin = df_cons.attrs.get("empleados_sin_match", [])
     if emp_sin:
         advertir(log, "Cruce con listado de empleados",
