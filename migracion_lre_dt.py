@@ -66,8 +66,8 @@ PARAMETROS_A_TRAER = [                  # (columna en parametrosMesuales, column
     ("aporteFAPPBAC",       "aporteFappbac_entrada"),
 ]
 COL_REBAJA_LLSS = "rebajallss_entrada"
-COL_IMPO_VALIDADO = "impo_validado_entrada"   # min(5210 + 5220, topeimp_entrada); va justo después de (5565)
-COL_BASECES_VALIDADO = "baseces_validado_entrada"   # min(5210 + 5220, topeces_entrada); va después de topeces_entrada
+COL_IMPO_VALIDADO = "impo_validado_entrada"   # min(5210 + 5220, topeimp_entrada [− impoMesAnt si 1116 > 0]); va justo después de (5565)
+COL_BASECES_VALIDADO = "baseces_validado_entrada"   # min(5210 + 5220, topeces_entrada [− impoMesAnt si 1116 > 0]); va después de topeces_entrada
 
 # Último mes imponible sin licencia (va después de 'Nro días de licencia médica en el mes(1116)')
 COL_DIAS_LIC_DT = "(1116)"
@@ -675,13 +675,6 @@ def agregar_columnas_nuevas(df, instituciones, cot_afp_hist, empleados, empresas
     rebaja = df[cols_rebaja].apply(pd.to_numeric, errors="coerce").fillna(0).sum(axis=1)
     df.insert(pos + len(PARAMETROS_A_TRAER) + 1, COL_REBAJA_LLSS, rebaja.round(0).astype("Int64"))
 
-    # impo_validado_entrada: min(5210 + 5220, topeimp_entrada); va justo después de (5565)
-    df.insert(pos + 1, COL_IMPO_VALIDADO, calcular_impo_validado(df))
-
-    # baseces_validado_entrada: min(5210 + 5220, topeces_entrada); va después de topeces_entrada
-    df.insert(df.columns.get_loc("topeces_entrada") + 1, COL_BASECES_VALIDADO,
-              calcular_impo_validado(df, "topeces_entrada", COL_BASECES_VALIDADO))
-
     # sueldoContrato_entrada
     df.insert(df.columns.get_loc(_buscar_col_codigo(df, COL_TASA_IND_DT)) + 1, COL_SUELDO_CONTRATO,
               calcular_sueldo_contrato(df))
@@ -695,14 +688,25 @@ def agregar_columnas_nuevas(df, instituciones, cot_afp_hist, empleados, empresas
 
     # imponibleLic_entrada
     df.insert(df.columns.get_loc(COL_IMP_MES_ANT_LIC) + 1, COL_IMPONIBLE_LIC, calcular_imponible_lic(df))
+
+    # impo_validado_entrada (justo después de (5565)) y baseces_validado_entrada (después de topeces_entrada).
+    # Se calculan al final porque, con licencia, usan impoMesAntporDdeLic_entrada.
+    df.insert(df.columns.get_loc(col_ultima) + 1, COL_IMPO_VALIDADO, calcular_impo_validado(df))
+    df.insert(df.columns.get_loc("topeces_entrada") + 1, COL_BASECES_VALIDADO,
+              calcular_impo_validado(df, "topeces_entrada", COL_BASECES_VALIDADO))
     return df
 
 
 def calcular_impo_validado(df, col_tope="topeimp_entrada", col_resultado=COL_IMPO_VALIDADO):
     """
-    min(Total haberes imponibles y tributables(5210) + Total haberes imponibles no tributables(5220), tope)  (entero).
+    Base imponible del mes validada contra un tope (entero):
       - impo_validado_entrada    → tope = topeimp_entrada
       - baseces_validado_entrada → tope = topeces_entrada
+      - Sin licencia (1116 = 0): min(5210 + 5220, tope).
+      - Con licencia (1116 > 0): min(5210 + 5220, tope − impoMesAntporDdeLic_entrada), mínimo 0
+        (la parte de los días de licencia ocupa el tope primero; misma regla que imponibleLic_entrada).
+        Si impoMesAntporDdeLic_entrada está vacío ('imponible no encontrado') → vacío; se recalcula al
+        ingresar el sueldo de contrato a mano.
       - Si el tope viene vacío (mes sin parámetros) → 5210 + 5220 sin tope.
     """
     cols = {}
@@ -713,8 +717,19 @@ def calcular_impo_validado(df, col_tope="topeimp_entrada", col_resultado=COL_IMP
     imponible = (pd.to_numeric(df[cols[COL_IMP_TRIB_DT]], errors="coerce").fillna(0)
                  + pd.to_numeric(df[cols[COL_IMP_NO_TRIB_DT]], errors="coerce").fillna(0))
     tope = pd.to_numeric(df[col_tope], errors="coerce").astype(float)
-    valor = imponible.astype(float).where(tope.isna() | (imponible <= tope), tope)   # min(5210 + 5220, tope)
-    return valor.round(0).astype("Int64")
+    dias_lic = pd.to_numeric(df[_buscar_col_codigo(df, COL_DIAS_LIC_DT)], errors="coerce").fillna(0)
+    impo_lic = pd.to_numeric(df[COL_IMP_MES_ANT_LIC], errors="coerce")
+    resultado = []
+    for h, t, dl, i in zip(imponible, tope, dias_lic, impo_lic):
+        if dl > 0:
+            if pd.isna(i):
+                resultado.append(None)
+                continue
+            if pd.notna(t):
+                t = max(t - i, 0)   # el tope que queda después de la parte de licencia
+        valor = h if pd.isna(t) else min(h, t)
+        resultado.append(int(round(valor)))
+    return pd.Series(resultado, index=df.index, dtype=object)
 
 
 def calcular_imponible_lic(df):
@@ -1160,6 +1175,10 @@ def aplicar_manuales(df, manuales):
         df[COL_IMP_MES_ANT_LIC] = calcular_impo_mes_ant_lic(df)
     if COL_IMPONIBLE_LIC in df.columns:
         df[COL_IMPONIBLE_LIC] = calcular_imponible_lic(df)
+    if COL_IMPO_VALIDADO in df.columns:
+        df[COL_IMPO_VALIDADO] = calcular_impo_validado(df)
+    if COL_BASECES_VALIDADO in df.columns:
+        df[COL_BASECES_VALIDADO] = calcular_impo_validado(df, "topeces_entrada", COL_BASECES_VALIDADO)
     return df, modificadas
 
 
@@ -1602,7 +1621,8 @@ def main():
 
     with st.expander("👁️ Vista previa del maestro"):
         previa = df_cons.head(100).copy()
-        for col_dato in list(DATOS_MANUALES) + [COL_IMP_MES_ANT_LIC, COL_IMPONIBLE_LIC]:
+        for col_dato in list(DATOS_MANUALES) + [COL_IMP_MES_ANT_LIC, COL_IMPONIBLE_LIC,
+                                                 COL_IMPO_VALIDADO, COL_BASECES_VALIDADO]:
             previa[col_dato] = previa[col_dato].map(lambda v: "" if v is None else str(v))
         vista = previa.style.set_properties(
             subset=[c for c in COLUMNAS_NUEVAS if c in df_cons.columns],
