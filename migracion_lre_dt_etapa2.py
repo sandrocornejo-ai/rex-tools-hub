@@ -58,9 +58,9 @@ AFECTO_SIS = {"sis", "aporteFAPPCEV"}
 AFECTO_BASE_CES_CALC = {"cesAporteCi", "cesAporteSol"}
 
 INSTITUCION_AFP = {"afp", "aporteAFPemp", "sis", "afpAhor", "trabajoPesa", "trabajoPesaEmpl",
-                   "cesAporteCi", "cesAporteSol"}
+                   "cesAporteCi", "cesAporteSol", "cesEmpleado"}   # cesEmpleado: misma institución que afp
 INSTITUCION_CAJA = {"cajaComp", "cajaCred", "cajaAhor", "cajaSegu"}
-INSTITUCION_BLANCO = {"aporteFAPPBAC", "cesEmpleado", "licenciaDias"}
+INSTITUCION_BLANCO = {"aporteFAPPBAC", "licenciaDias"}
 
 PARCIAL7 = {"isapre", "cesAporteSol", "mutual", "aporteAFPemp", "aporteFAPPCEV", "sis"}
 PARCIAL8 = {"isapre", "cesAporteSol"}

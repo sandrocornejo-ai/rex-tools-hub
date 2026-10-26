@@ -988,6 +988,78 @@ def calcular_ult_imp_sin_lic(df):
     return pd.Series(resultado, index=df.index, dtype=object)
 
 
+def sin_mes_anterior_sin_lic(df):
+    """
+    True para los registros con licencia (1116 > 0) en que NO se encontró un mes anterior sin licencia
+    (1116 = 0) del mismo Rut entre los meses subidos (misma búsqueda que calcular_ult_imp_sin_lic).
+    En esos casos ultImpSinLic_entrada sale del sueldo de contrato o queda 'imponible no encontrado'.
+    """
+    rut = df[_buscar_col_rut(df)].map(normalizar_rut)
+    dias_lic = pd.to_numeric(df[_buscar_col_codigo(df, COL_DIAS_LIC_DT)], errors="coerce").fillna(0)
+    meses_sin_lic = {}
+    for r, mes, dl in zip(rut, df[COL_MES_PROCESO], dias_lic):
+        meses_sin_lic.setdefault(r, {}).setdefault(mes, dl)   # primer registro del mes
+    resultado = []
+    for r, mes, dl in zip(rut, df[COL_MES_PROCESO], dias_lic):
+        if dl <= 0:
+            resultado.append(False)
+            continue
+        hay = any(m_ < mes and d == 0 for m_, d in meses_sin_lic.get(r, {}).items())
+        resultado.append(not hay)
+    return pd.Series(resultado, index=df.index)
+
+
+def informe_licencias_sin_imponible(df, sin_mes_ant, filas_manuales=None):
+    """
+    Informe de registros con días de licencia (1116) > 0 sin último imponible sin licencia
+    (no hay un mes anterior sin licencia del mismo Rut). Columna 'Origen ultImpSinLic_entrada':
+    sueldo de contrato del listado, sueldo ingresado manualmente o pendiente.
+    """
+    manuales = set((filas_manuales or {}).get(COL_ULT_IMP_SIN_LIC, []))
+    cols = [COL_MES_PROCESO, _buscar_col_rut(df), _buscar_col_codigo(df, COL_FECHA_INI_DT), COL_NUM_CONTRATO,
+            COL_EMPRESA, _buscar_col_codigo(df, COL_DIAS_TRAB_DT), _buscar_col_codigo(df, COL_DIAS_LIC_DT),
+            _buscar_col_codigo(df, COL_IMP_TRIB_DT), _buscar_col_codigo(df, COL_IMP_NO_TRIB_DT),
+            "topeimp_entrada", COL_SUELDO_CONTRATO, COL_ULT_IMP_SIN_LIC]
+    cols = [c for c in dict.fromkeys(cols) if c is not None and c in df.columns]
+    posiciones = [i for i, v in enumerate(sin_mes_ant.tolist()) if v]
+    out = df.iloc[posiciones][cols].copy()
+
+    def origen(pos, valor):
+        if valor == TXT_IMP_NO_ENCONTRADO:
+            return "Pendiente: imponible no encontrado (falta sueldo de contrato)"
+        if pos in manuales:
+            return "Sueldo de contrato ingresado manualmente (con tope)"
+        return "Sueldo de contrato (con tope)"
+
+    out["Origen ultImpSinLic_entrada"] = [origen(p, v) for p, v in zip(posiciones, out[COL_ULT_IMP_SIN_LIC])]
+    return out.reset_index(drop=True)
+
+
+def excel_informe_licencias(df_inf):
+    output = io.BytesIO()
+    with pd.ExcelWriter(output, engine="openpyxl") as writer:
+        df_inf.to_excel(writer, index=False, sheet_name="Licencias sin imponible")
+        ws = writer.sheets["Licencias sin imponible"]
+        relleno = PatternFill("solid", fgColor="1A2744")
+        fuente = Font(bold=True, color="FFFFFF", size=10)
+        amarillo = PatternFill("solid", fgColor=AMARILLO)
+        for celda in ws[1]:
+            celda.fill, celda.font = relleno, fuente
+            celda.alignment = Alignment(horizontal="center", vertical="center", wrap_text=True)
+            ws.column_dimensions[celda.column_letter].width = 18
+        ws.column_dimensions[ws.cell(1, ws.max_column).column_letter].width = 55
+        col_ult = list(df_inf.columns).index(COL_ULT_IMP_SIN_LIC) + 1 if COL_ULT_IMP_SIN_LIC in df_inf.columns else None
+        for fila in ws.iter_rows(min_row=2):
+            if col_ult and fila[col_ult - 1].value == TXT_IMP_NO_ENCONTRADO:
+                for c in fila:
+                    c.fill = amarillo
+            for c in fila:
+                if isinstance(c.value, (int, float)):
+                    c.number_format = "#,##0"
+        ws.freeze_panes = "A2"
+    return output.getvalue()
+
+
 def cargar_equiv_conceptos(ruta=RUTA_EQUIV):
     """
     Lee data/equiv_conceptos.xlsx: formato nuevo (cod_lre_dt, id_concepto, tipo_concepto, nombre_concepto)
@@ -1584,6 +1656,7 @@ def main():
     claves_pend = {f"{d}|{r}" for d, r in zip(pendientes["Dato"], pendientes["Rut trabajador"])}
     manuales = {k: v for k, v in st.session_state.get(CLAVE_IMP_MANUAL, {}).items() if k in claves_pend}
     df_cons, filas_manuales = aplicar_manuales(df_cons, manuales)
+    sin_mes_ant = sin_mes_anterior_sin_lic(df_cons)[en_rango.values].reset_index(drop=True)
     df_cons, filas_manuales = filtrar_rango(df_cons, en_rango, filas_manuales)
     try:
         df_cons = agregar_cuadratura_liquido(df_cons, tipos_lre)
@@ -1791,6 +1864,27 @@ def main():
         file_name=nombre_archivo_maestro(mes_desde, mes_hasta, meses_subidos),
         mime="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet",
     )
+
+    # Informe: registros con licencia (1116 > 0) sin último imponible sin licencia
+    df_inf_lic = informe_licencias_sin_imponible(df_cons, sin_mes_ant, filas_manuales)
+    if df_inf_lic.empty:
+        st.caption("ℹ️ Todos los registros con licencia (1116 > 0) tienen un mes anterior sin licencia "
+                   f"para {COL_ULT_IMP_SIN_LIC}.")
+    else:
+        n_pend = int((df_inf_lic[COL_ULT_IMP_SIN_LIC] == TXT_IMP_NO_ENCONTRADO).sum())
+        msg_inf = (f"{len(df_inf_lic)} registro(s) con licencia (1116 > 0) sin un mes anterior sin licencia: "
+                   f"{COL_ULT_IMP_SIN_LIC} se tomó del sueldo de contrato"
+                   + (f" ({n_pend} aún pendiente(s))." if n_pend else "."))
+        st.info(f"🩺 {msg_inf}")
+        log.info("Informe licencias sin último imponible", msg_inf)
+        st.download_button(
+            "⬇️ Descargar informe de licencias sin último imponible (.xlsx)",
+            data=excel_informe_licencias(df_inf_lic),
+            file_name=nombre_archivo_maestro(mes_desde, mes_hasta, meses_subidos).replace(
+                "maestro_lre_dt_", "licencias_sin_ult_imponible_"),
+            mime="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet",
+            key="dt_informe_licencias",
+        )
     # Etapa 2 — Creación de archivo de carga de liquidaciones (migracion_lre_dt_etapa2.py)
     from migracion_lre_dt_etapa2 import seccion_etapa2  # noqa: E402  (import tardío: evita import circular)
     seccion_etapa2(df_cons, con_codigo, log, mes_desde, mes_hasta)
