@@ -270,6 +270,11 @@ def generar_carga(df, equiv, con_codigo=None):
         for concepto, monto in calculados.items():
             montos[concepto] = montos.get(concepto, 0) + monto
 
+        # 4b) Ajuste compensaSobre de la Etapa 1 (5501 = 0 con cuadratura negativa): haber como cualquier otro
+        compensa = _num(r.get(m1.COL_COMPENSA))
+        if compensa > 0:
+            montos["compensaSobre"] = montos.get("compensaSobre", 0) + compensa
+
         # 5) Conceptos que van siempre
         forzados = set(CONCEPTOS_SIEMPRE) | (set(LICENCIA_MES_COMPLETO) if lic_mes_completo else set())
         for concepto in sorted(forzados):

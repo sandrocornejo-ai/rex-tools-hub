@@ -130,7 +130,9 @@ COL_TOTAL_DESC_DT = "(5301)"
 CODIGOS_HABERES_TOT = ["(5210)", "(5220)", "(5230)", "(5240)"]
 COL_DIF_LIQ_TOT = "difLiqTotales_entrada"    # (5210+5220+5230+5240) − 5301 − 5501
 COL_DIF_LIQ_DET = "difLiqDetalle_entrada"    # (Haber afecto + Haber exento) − (Descuento + Descuento Legal) − 5501
-COLUMNAS_NUEVAS += [COL_DIF_LIQ_TOT, COL_DIF_LIQ_DET, COL_IMPO_VALIDADO, COL_BASECES_VALIDADO]
+COL_COMPENSA = "compensaSobre_entrada"      # ajuste: si 5501 = 0 y difLiqTotales < 0 → −difLiqTotales (haber compensaSobre)
+COLUMNAS_NUEVAS += [COL_COMPENSA, COL_DIF_LIQ_TOT, COL_DIF_LIQ_DET, COL_IMPO_VALIDADO, COL_BASECES_VALIDADO]
+CLAVE_COMPENSA = "ajuste_compensa_sobre"     # st.session_state: firma de los casos con el ajuste aplicado
 
 # Desglose del AFC - Aporte empleador (4151) — van inmediatamente después de la columna 4151
 COL_AFC_EMPLEADOR_DT = "(4151)"
@@ -1085,7 +1087,7 @@ def cargar_equiv_conceptos(ruta=RUTA_EQUIV):
     return {c: t[0] for c, t in tipos.items()}
 
 
-def agregar_cuadratura_liquido(df, tipos_lre):
+def agregar_cuadratura_liquido(df, tipos_lre, compensa=None):
     """
     Cuadratura del Total líquido (5501), por registro. Agrega después de 'Total líquido(5501)':
       - difLiqTotales_entrada = (5210 + 5220 + 5230 + 5240) − 5301 − 5501
@@ -1093,6 +1095,8 @@ def agregar_cuadratura_liquido(df, tipos_lre):
                                 (Haber afecto/Haber exento suman; Descuento/Descuento Legal restan) − 5501.
                                 No suman 5501 (control), 3164 (informativo) ni 3167 (zona extrema).
     0 = cuadra (tolerancia ±1). Registros con días trabajados (1115) = 0 no se validan → vacío.
+    compensa: Serie (mismo índice) con el haber compensaSobre aplicado por el usuario; se agrega como
+    compensaSobre_entrada (después de 5501, antes de las diferencias) y suma como haber en ambas fórmulas.
     attrs['cols_sin_tipo']: {columna: n° registros con monto} de columnas 2xxx/3xxx sin Tipo.
     """
     def num(col):
@@ -1103,10 +1107,13 @@ def agregar_cuadratura_liquido(df, tipos_lre):
     if faltan:
         raise ErrorArchivo(f"No se encontraron las columnas {faltan} para la cuadratura del Total líquido.")
     liquido = num(col_liq)
+    if compensa is None:
+        compensa = pd.Series(None, index=df.index, dtype=object)
+    comp = pd.to_numeric(compensa, errors="coerce").fillna(0)
 
     # 1) Totales DT
     haberes = sum(num(_buscar_col_codigo(df, c)) for c in CODIGOS_HABERES_TOT)
-    dif_tot = haberes - num(_buscar_col_codigo(df, COL_TOTAL_DESC_DT)) - liquido
+    dif_tot = haberes + comp - num(_buscar_col_codigo(df, COL_TOTAL_DESC_DT)) - liquido
 
     # 2) Detalle por Tipo
     calc_det = pd.Series(0.0, index=df.index)
@@ -1122,7 +1129,7 @@ def agregar_cuadratura_liquido(df, tipos_lre):
                 sin_tipo[col] = n
             continue
         calc_det += signo * num(col)
-    dif_det = calc_det - liquido
+    dif_det = calc_det + comp - liquido
 
     col_trab = _buscar_col_codigo(df, COL_DIAS_TRAB_DT)
     valida = num(col_trab) != 0 if col_trab else pd.Series(True, index=df.index)
@@ -1131,11 +1138,44 @@ def agregar_cuadratura_liquido(df, tipos_lre):
         return pd.Series([int(round(d)) if v else None for d, v in zip(dif, valida)], index=df.index, dtype=object)
 
     pos = df.columns.get_loc(col_liq)
-    df.insert(pos + 1, COL_DIF_LIQ_TOT, serie(dif_tot))
-    df.insert(pos + 2, COL_DIF_LIQ_DET, serie(dif_det))
+    df.insert(pos + 1, COL_COMPENSA, compensa.map(lambda v: None if pd.isna(v) or v == 0 else int(v)))
+    df.insert(pos + 2, COL_DIF_LIQ_TOT, serie(dif_tot))
+    df.insert(pos + 3, COL_DIF_LIQ_DET, serie(dif_det))
     df.attrs["cols_sin_tipo"] = sin_tipo
     df.attrs["cuadratura_no_validados"] = int((~valida).sum())
     return df
+
+
+def casos_compensa_sobre(df):
+    """
+    Registros que califican para el ajuste compensaSobre (después de agregar_cuadratura_liquido, sin ajuste):
+    días trabajados (1115) ≠ 0, Total líquido (5501) = 0 y difLiqTotales_entrada negativo (más allá de ±1).
+    Retorna DataFrame con la posición del registro y el monto propuesto (= −difLiqTotales_entrada).
+    """
+    col_liq = _buscar_col_codigo(df, COL_LIQUIDO_DT)
+    liq = pd.to_numeric(df[col_liq], errors="coerce").fillna(0)
+    dif = pd.to_numeric(df[COL_DIF_LIQ_TOT], errors="coerce")
+    mascara = dif.notna() & (liq == 0) & (dif < -TOLERANCIA_LIQ)
+    pos = [i for i, m_ in enumerate(mascara.tolist()) if m_]
+    col_rut, col_desc = _buscar_col_rut(df), _buscar_col_codigo(df, COL_TOTAL_DESC_DT)
+    haberes = sum(pd.to_numeric(df[_buscar_col_codigo(df, c)], errors="coerce").fillna(0) for c in CODIGOS_HABERES_TOT)
+    out = pd.DataFrame({
+        "_pos": pos,
+        COL_MES_PROCESO: df[COL_MES_PROCESO].iloc[pos].values,
+        "Rut trabajador": df[col_rut].iloc[pos].values,
+        "Total haberes (5210+5220+5230+5240)": haberes.iloc[pos].round(0).astype("int64").values,
+        "Total descuentos (5301)": pd.to_numeric(df[col_desc], errors="coerce").fillna(0).iloc[pos].round(0).astype("int64").values,
+        "Total líquido (5501)": liq.iloc[pos].round(0).astype("int64").values,
+        COL_DIF_LIQ_TOT: dif.iloc[pos].astype("int64").values,
+    })
+    out["compensaSobre propuesto"] = -out[COL_DIF_LIQ_TOT]
+    return out
+
+
+def firma_compensa(casos):
+    """Identifica el conjunto de casos (si cambian los archivos o el rango, el ajuste ya no aplica)."""
+    return "|".join(f"{m}:{r}:{v}" for m, r, v in zip(casos[COL_MES_PROCESO], casos["Rut trabajador"],
+                                                     casos["compensaSobre propuesto"]))
 
 
 def codigos_sin_match(df, col_codigo, col_resultado):
@@ -1659,7 +1699,16 @@ def main():
     sin_mes_ant = sin_mes_anterior_sin_lic(df_cons)[en_rango.values].reset_index(drop=True)
     df_cons, filas_manuales = filtrar_rango(df_cons, en_rango, filas_manuales)
     try:
-        df_cons = agregar_cuadratura_liquido(df_cons, tipos_lre)
+        df_sin_cuad = df_cons
+        df_cons = agregar_cuadratura_liquido(df_sin_cuad.copy(), tipos_lre)
+        # Ajuste compensaSobre: 5501 = 0 y cuadratura Totales DT negativa → se propone; se aplica con un botón
+        casos_comp = casos_compensa_sobre(df_cons)
+        firma_comp = firma_compensa(casos_comp) if not casos_comp.empty else ""
+        ajuste_aplicado = bool(firma_comp) and st.session_state.get(CLAVE_COMPENSA) == firma_comp
+        if ajuste_aplicado:
+            compensa = pd.Series(None, index=df_sin_cuad.index, dtype=object)
+            compensa.iloc[casos_comp["_pos"].tolist()] = casos_comp["compensaSobre propuesto"].tolist()
+            df_cons = agregar_cuadratura_liquido(df_sin_cuad.copy(), tipos_lre, compensa)
     except Exception as e:  # noqa: BLE001
         abortar(log, "Cuadratura Total líquido (5501)", str(e), excepcion=e)
     meses = sorted(df_cons[COL_MES_PROCESO].unique())
@@ -1786,6 +1835,39 @@ def main():
             log.registros(df_cons, df_cons[col_nueva] == "",
                           f"Código {col_lre} no existe en Instituciones.xlsx hoja {hoja} ({col_nueva} vacía)",
                           col_orig, "Código: ")
+
+    # Ajuste compensaSobre (Total líquido 5501 = 0 con cuadratura negativa)
+    if not casos_comp.empty:
+        n_comp, total_comp = len(casos_comp), int(casos_comp["compensaSobre propuesto"].sum())
+        monto_txt = f"{total_comp:,}".replace(",", ".")
+        vista_comp = casos_comp.drop(columns="_pos")
+        if not ajuste_aplicado:
+            st.warning(
+                f"⚖️ **{n_comp} registro(s) con Total líquido (5501) = 0 y cuadratura negativa** "
+                f"(los descuentos son mayores que los haberes).  \n"
+                f"**El sistema ofrece:** agregar el haber **compensaSobre** por la diferencia en positivo "
+                f"(total ${monto_txt}). Se guarda en la columna {COL_COMPENSA} del maestro y en la Etapa 2 "
+                f"genera una fila compensaSobre igual a cualquier otro haber. Con el ajuste, la cuadratura de "
+                f"esos registros queda en 0 y se vuelve a validar."
+            )
+            st.dataframe(vista_comp, use_container_width=True, hide_index=True)
+            st.button("✅ Aplicar ajuste", type="primary", key="btn_compensa",
+                      on_click=lambda f=firma_comp: st.session_state.__setitem__(CLAVE_COMPENSA, f))
+            log.advertencia("Ajuste compensaSobre",
+                            f"{n_comp} registro(s) con Total líquido (5501) = 0 y {COL_DIF_LIQ_TOT} negativo: "
+                            f"ajuste compensaSobre propuesto (total ${monto_txt}), NO aplicado.")
+        else:
+            st.success(f"⚖️ **Ajuste compensaSobre aplicado** — {n_comp} registro(s), total ${monto_txt}. "
+                       f"Cuadratura revalidada (resultado abajo).")
+            with st.expander("Ver registros ajustados"):
+                st.dataframe(vista_comp, use_container_width=True, hide_index=True)
+            st.button("↩️ Deshacer ajuste", key="btn_compensa_deshacer",
+                      on_click=lambda: st.session_state.pop(CLAVE_COMPENSA, None))
+            log.info("Ajuste compensaSobre", f"Ajuste aplicado a {n_comp} registro(s): compensaSobre total ${monto_txt}.")
+            mascara_comp = pd.Series(False, index=df_cons.index)
+            mascara_comp.iloc[casos_comp["_pos"].tolist()] = True
+            log.registros(df_cons, mascara_comp, "Ajuste compensaSobre aplicado (5501 = 0, cuadratura negativa)",
+                          COL_COMPENSA, "compensaSobre: ")
 
     # Cuadratura del Total líquido (5501)
     formulas = {
