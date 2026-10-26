@@ -437,59 +437,65 @@ def excel_carga(df_carga, marcadas=()):
 # ─────────────────────────────────────────────
 # PANTALLA (se llama desde migracion_lre_dt.main, después del maestro)
 # ─────────────────────────────────────────────
-def seccion_etapa2(df_cons, con_codigo, log, mes_desde, mes_hasta):
-    st.divider()
-    st.subheader("📤 Etapa 2 — Creación de archivo de carga de liquidaciones")
-    st.caption("Genera el archivo de importación 'liquidación detalle' de Rex+ a partir del maestro de arriba "
-               "(incluye los datos ingresados a mano).")
-    if st.button("⚙️ Generar archivo de carga de liquidaciones", type="primary", key="btn_etapa2"):
-        st.session_state[CLAVE_GENERAR] = True
-    if not st.session_state.get(CLAVE_GENERAR):
-        return
-
+def calcular_etapa2(df_cons, con_codigo, log):
+    """
+    Genera el archivo de carga (sin mostrar nada en pantalla) y deja todo anotado en el log.
+    Retorna dict: estado ('ok' | 'obs' | 'error'), mensaje, df_carga, problemas, marcadas, resumen.
+    """
+    res = {"estado": "error", "mensaje": "", "df_carga": None, "problemas": [], "marcadas": [], "resumen": None}
     sin_tope = meses_sin_tope(df_cons)
     if sin_tope:
-        msg = ("El tope imponible AFP (topeimp_entrada) está vacío o en 0 para: **" + ", ".join(sin_tope)
-               + "**. Completa esos meses en Parámetros mensuales y vuelve a subir el archivo.")
-        log.error(ETAPA_LOG, msg.replace("**", ""))
-        st.error(f"❌ {msg}")
-        return
+        res["mensaje"] = ("El tope imponible AFP está vacío o en 0 para: **" + ", ".join(sin_tope)
+                          + "**. Completa esos meses en Parámetros mensuales y vuelve a subir el archivo.")
+        log.error(ETAPA_LOG, res["mensaje"].replace("**", ""))
+        return res
     try:
         equiv = cargar_equiv_detalle()
         df_carga, problemas, marcadas = generar_carga(df_cons, equiv, con_codigo)
     except Exception as e:  # noqa: BLE001
-        log.error(ETAPA_LOG, f"No se pudo generar el archivo de carga: {e}")
-        st.error(f"❌ No se pudo generar el archivo de carga: {e}")
-        return
+        res["mensaje"] = f"No se pudo generar el archivo de carga: {e}"
+        log.error(ETAPA_LOG, res["mensaje"])
+        return res
 
-    # Log: un resumen por tipo de problema + detalle por registro
     if problemas:
         log.detalle.extend(problemas)
         por_tipo = pd.Series([re.sub(r"\(\d{4}\)|\d{4}", "####", p["Problema"]) for p in problemas]).value_counts()
         for tipo, n in por_tipo.items():
             log.advertencia(ETAPA_LOG, f"{n} caso(s): {tipo}")
-        st.warning(f"⚠️ {len(problemas)} observación(es) en la generación (filas afectadas en amarillo en el Excel). "
-                   "Revisa la hoja 'Detalle registros' del log.")
-        with st.expander("Ver observaciones"):
-            st.dataframe(pd.DataFrame(problemas), use_container_width=True, hide_index=True)
     else:
         log.info(ETAPA_LOG, "Archivo de carga generado sin observaciones.")
-
     n_trab = df_carga["Id empleado"].nunique()
-    st.success(f"✅ **Archivo de carga generado** — {len(df_carga)} filas · {n_trab} trabajador(es) · "
-               f"meses {mes_desde} a {mes_hasta}" + ("" if not problemas else " (con observaciones)"))
-    log.info(ETAPA_LOG, f"{len(df_carga)} filas, {n_trab} trabajadores, meses {mes_desde} a {mes_hasta}.")
-    resumen = (df_carga.groupby("Id del concepto")
-               .agg(Filas=("Monto del concepto", "size"), Monto=("Monto del concepto", "sum"))
-               .reset_index().sort_values("Id del concepto"))
-    with st.expander("📊 Resumen por concepto"):
-        st.dataframe(resumen, use_container_width=True, hide_index=True)
-    with st.expander("👁️ Vista previa del archivo de carga"):
+    log.info(ETAPA_LOG, f"{len(df_carga)} filas, {n_trab} trabajadores.")
+    res.update({
+        "estado": "obs" if problemas else "ok", "df_carga": df_carga, "problemas": problemas, "marcadas": marcadas,
+        "resumen": (df_carga.groupby("Id del concepto")
+                    .agg(Filas=("Monto del concepto", "size"), Monto=("Monto del concepto", "sum"))
+                    .reset_index().sort_values("Id del concepto")),
+    })
+    return res
+
+
+def nombre_archivo_carga(mes_desde, mes_hasta):
+    return f"carga_liquidaciones_{mes_desde}_a_{mes_hasta}_{datetime.now():%Y%m%d_%H%M%S}.xlsx"
+
+
+def mostrar_etapa2(res, mes_desde, mes_hasta, clave="e2"):
+    """Muestra el resultado de calcular_etapa2 (paso 4 de la pantalla)."""
+    if res["estado"] == "error":
+        st.error(f"❌ {res['mensaje']}")
+        return
+    df_carga, problemas = res["df_carga"], res["problemas"]
+    n_trab = df_carga["Id empleado"].nunique()
+    if problemas:
+        st.warning(f"⚠️ **Archivo de carga generado con {len(problemas)} observación(es)** — {len(df_carga)} filas · "
+                   f"{n_trab} trabajador(es) · {mes_desde} a {mes_hasta}. Las filas afectadas quedan en amarillo "
+                   "en el Excel; revisa cada caso abajo.")
+        with st.expander(f"Ver observaciones ({len(problemas)})"):
+            st.dataframe(pd.DataFrame(problemas), use_container_width=True, hide_index=True)
+    else:
+        st.success(f"✅ **Archivo de carga generado sin observaciones** — {len(df_carga)} filas · "
+                   f"{n_trab} trabajador(es) · {mes_desde} a {mes_hasta}.")
+    with st.expander(f"📊 Resumen por concepto ({len(res['resumen'])} conceptos)"):
+        st.dataframe(res["resumen"], use_container_width=True, hide_index=True)
+    with st.expander("👁️ Vista previa del archivo de carga (primeras 200 filas)"):
         st.dataframe(df_carga.head(200), use_container_width=True, hide_index=True)
-    st.download_button(
-        "⬇️ Descargar archivo de carga de liquidaciones (.xlsx)",
-        data=excel_carga(df_carga, marcadas),
-        file_name=f"carga_liquidaciones_{mes_desde}_a_{mes_hasta}_{datetime.now():%Y%m%d_%H%M%S}.xlsx",
-        mime="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet",
-        key="dl_etapa2",
-    )

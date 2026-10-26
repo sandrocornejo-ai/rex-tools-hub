@@ -1530,20 +1530,165 @@ def nombre_archivo_maestro(mes_desde, mes_hasta, meses_subidos):
     return f"maestro_lre_dt_{periodo}_{datetime.now():%Y%m%d_%H%M%S}.xlsx"
 
 
+
+
 # ─────────────────────────────────────────────
-# INTERFAZ
+# INTERFAZ POR PASOS (1 Archivos · 2 Revisión · 3 Maestro · 4 Archivo de carga · 5 Descargas)
+# Los cálculos son los mismos de siempre; aquí solo se ordena la presentación.
 # ─────────────────────────────────────────────
+CLAVE_PASO = "lre_dt_paso"            # paso visible (1 a 5)
+CLAVE_RONDA = "lre_dt_ronda"          # cambia al "Empezar otra migración" (reinicia los cargadores)
+CLAVE_RANGO = "lre_dt_rango"          # último rango de meses elegido (se conserva al cambiar de paso)
+
+# (clave, número, tipo, título, extensiones, varios archivos, ayuda)
+CARGADORES = [
+    ("up_csv", 1, "CSV, uno por mes", "LRE descargados desde la DT", ["csv"], True,
+     "El nombre de cada archivo debe incluir año-mes. Ej: Ene_26_declaracion.csv, 2026-01.csv, 202601.csv"),
+    ("up_empleados", 2, "Excel de Rex+", "Listado de empleados", ["xlsx"], False,
+     "Se busca por Rut + Fecha inicio contrato para traer Empresa (col. BG) y Contrato (col. BE)."),
+    ("up_empresas", 3, "Excel de Rex+", "Listado de empresas", ["xlsx"], False, None),
+    ("up_cot_hist", 4, "tabla de referencia", "Cotizaciones históricas AFP y SIS", ["xlsx"], False,
+     "Columnas requeridas: id_afp_hist, cot_hist_afp, sis_hist."),
+    ("up_parametros", 5, "tabla de referencia", "Parámetros mensuales", ["xlsx"], False,
+     "Una fila por mes (mes_Proc = yyyy-mm) con topes AFP, cesantía y salud."),
+    ("up_lista_conceptos", 6, "Excel de Rex+", "Lista de conceptos", ["xlsx"], False,
+     "Se valida que los aportes del empleador (aporteAFPemp, aporteFAPPCEV, aporteFAPPBAC, "
+     "aportesegurocovid y sus reliquidaciones) no tengan Código LRE."),
+]
+
+# Temas de "Revisiones por tema" y de qué etapas del log vienen sus avisos
+TEMAS = ["Archivos de la DT", "Cruce con listados de empleados y empresas", "Instituciones y tasas",
+         "Parámetros mensuales", "Licencias médicas y sueldos", "Cuadraturas"]
+TEMA_DE_ETAPA = {
+    "Lectura de CSV de la DT": TEMAS[0], "Consolidación": TEMAS[0], "Selección de meses": TEMAS[0],
+    "Lectura de archivos de referencia": TEMAS[1], "Cruce con listado de empleados": TEMAS[1],
+    "Cruce con listado de empresas": TEMAS[1], "Validación Lista de conceptos": TEMAS[1],
+    "Cruce con Instituciones.xlsx": TEMAS[2], "Cruce con cotizaciones históricas AFP/SIS": TEMAS[2],
+    "Parámetros mensuales": TEMAS[3],
+    "Último imponible sin licencia": TEMAS[4], "Sueldo de contrato": TEMAS[4],
+    "Cuadratura Total líquido (5501)": TEMAS[5], "Desglose AFC aporte empleador (4151)": TEMAS[5],
+}
+
+
+class Avisos:
+    """Junta los avisos por tema para mostrarlos agrupados (y los anota en el log como siempre)."""
+
+    def __init__(self, log):
+        self.log = log
+        self.items = {t: [] for t in TEMAS}
+
+    def advertir(self, etapa, texto, texto_log=None, archivo=""):
+        self.items[TEMA_DE_ETAPA.get(etapa, TEMAS[0])].append(("aviso", texto))
+        self.log.advertencia(etapa, texto_log or texto.replace("**", ""), archivo)
+
+    def ok(self, tema, texto):
+        self.items[tema].append(("ok", texto))
+
+    def nota(self, tema, texto):
+        self.items[tema].append(("nota", texto))
+
+    def n_avisos(self, tema):
+        return sum(1 for tipo, _ in self.items[tema] if tipo == "aviso")
+
+
+def _ir_a(paso):
+    st.session_state[CLAVE_PASO] = paso
+
+
+def _empezar_otra():
+    ronda = st.session_state.get(CLAVE_RONDA, 0) + 1
+    for k in [CLAVE_PASO, CLAVE_RANGO, CLAVE_IMP_MANUAL, CLAVE_COMPENSA]:
+        st.session_state.pop(k, None)
+    st.session_state[CLAVE_RONDA] = ronda
+
+
+def _miles(n):
+    return f"{int(round(n)):,}".replace(",", ".")
+
+
+def _cargadores(paso, ronda, ui):
+    """
+    Dibuja los 6 cargadores (en el paso 1 como tarjetas; en los demás dentro de un desplegable, para que los
+    archivos no se pierdan al cambiar de paso). Retorna ({clave: archivo(s)}, {clave: espacio para el estado}).
+    """
+    claves = {c[0]: f"{c[0]}_{ronda}" for c in CARGADORES}
+    cargados = sum(1 for c in CARGADORES if st.session_state.get(claves[c[0]]))
+    destino = st.container() if paso == 1 else st.expander(
+        f"📁 Archivos cargados ({cargados} de 6) — abre aquí para cambiar alguno")
+    archivos, espacios = {}, {}
+    with destino:
+        if paso == 1:
+            espacios["_progreso"] = st.empty()
+        cols = st.columns(2)
+        for i, (clave, num, tipo, titulo, ext, varios, ayuda) in enumerate(CARGADORES):
+            with cols[i % 2]:
+                with st.container(border=True):
+                    espacios[clave] = st.empty()
+                    archivos[clave] = st.file_uploader(
+                        f"Archivo {num} · {titulo}", type=ext, accept_multiple_files=varios,
+                        key=claves[clave], help=ayuda, label_visibility="collapsed")
+    for clave, num, tipo, titulo, *_ in CARGADORES:
+        espacios[clave].markdown(ui.tarjeta_archivo_titulo(num, tipo, titulo, bool(archivos[clave]))
+                                 + ('<div class="rx-up-st">Arrastra el archivo aquí o búscalo en tu computador.</div>'
+                                    if not archivos[clave] else ""), unsafe_allow_html=True)
+    return archivos, espacios
+
+
+def _estado_cargador(espacios, clave, ui, detalle_html):
+    num, tipo, titulo = next((c[1], c[2], c[3]) for c in CARGADORES if c[0] == clave)
+    espacios[clave].markdown(ui.tarjeta_archivo_titulo(num, tipo, titulo, True)
+                             + f'<div class="rx rx-up-st">{detalle_html}</div>', unsafe_allow_html=True)
+
+
+def _selector_meses(meses, contenedor):
+    """Rango de meses (desde – hasta). Se recuerda al cambiar de paso."""
+    guardado = st.session_state.get(CLAVE_RANGO)
+    valor = guardado if guardado and guardado[0] in meses and guardado[1] in meses else (meses[0], meses[-1])
+    if len(meses) == 1:
+        contenedor.markdown(f"📅 **Mes a procesar:** {meses[0]}")
+        return meses[0], meses[0]
+    desde, hasta = contenedor.select_slider(
+        "📅 Meses a procesar (desde – hasta)", options=meses, value=valor,
+        key=f"rango_meses_{meses[0]}_{meses[-1]}_{len(meses)}",
+        help="Rango de meses corridos. Para un solo mes, deja ambos extremos en el mismo mes. "
+             "Los meses subidos fuera del rango se usan solo como historia (meses anteriores).")
+    st.session_state[CLAVE_RANGO] = (desde, hasta)
+    return desde, hasta
+
+
+def _navegacion(paso, siguiente=None, texto_sig="", anterior=True, clave=""):
+    st.write("")
+    c1, _, c3 = st.columns([1.4, 1, 1.4])
+    if anterior and paso > 1:
+        c1.button(f"← Volver a {ui_pasos()[paso - 2]}", key=f"nav_back_{clave}", on_click=_ir_a, args=(paso - 1,),
+                  use_container_width=True)
+    if siguiente:
+        c3.button(texto_sig, type="primary", key=f"nav_next_{clave}", on_click=_ir_a, args=(siguiente,),
+                  use_container_width=True)
+
+
+def ui_pasos():
+    import migracion_lre_dt_ui as ui
+    return ui.PASOS
+
+
 def main():
     st.set_page_config(page_title="Migración desde LRE DT", page_icon="🏛️", layout="wide")
     from salir import boton_salir  # noqa: E402
+    import migracion_lre_dt_ui as ui  # noqa: E402
+    from migracion_lre_dt_etapa2 import (calcular_etapa2, excel_carga, mostrar_etapa2,  # noqa: E402
+                                         nombre_archivo_carga)
     boton_salir()
-
-    st.title("🏛️ Migración desde LRE DT")
-    st.caption("Etapa 1 — Armado del maestro: consolida los LRE descargados desde la DT y los completa con los datos de referencia. "
-               "Etapa 2 — Creación de archivo de carga de liquidaciones (al final de la página).")
+    ui.estilos()
     log = LogProceso()
+    av = Avisos(log)
+    ronda = st.session_state.get(CLAVE_RONDA, 0)
+    paso = st.session_state.get(CLAVE_PASO, 1)
 
-    # Tabla fija de instituciones (data/Instituciones.xlsx)
+    # Encabezado, indicador de pasos y rango de meses se llenan más abajo, cuando ya hay datos
+    zona_enc = st.container()
+    zona_pasos = st.empty()
+
     try:
         instituciones = cargar_instituciones()
     except Exception as e:  # noqa: BLE001
@@ -1552,53 +1697,49 @@ def main():
         tipos_lre = cargar_equiv_conceptos()
     except Exception as e:  # noqa: BLE001
         abortar(log, "Carga de equiv_conceptos.xlsx", str(e), "equiv_conceptos.xlsx", e)
-    with st.expander(
-        "🏦 Instituciones cargadas (data/Instituciones.xlsx): "
-        + " · ".join(f"{h} {len(d)}" for h, d in instituciones.items())
-    ):
-        for hoja, df_inst in instituciones.items():
-            st.markdown(f"**{hoja}**")
-            st.dataframe(df_inst, use_container_width=True, hide_index=True)
 
-    # Archivos de entrada del cliente
-    col1, col2 = st.columns(2)
-    with col1:
-        archivos = st.file_uploader(
-            "1️⃣ Archivos CSV descargados desde la DT (todos)",
-            type=["csv"],
-            accept_multiple_files=True,
-            help="El nombre de cada archivo debe incluir año-mes. Ej: Ene_26_declaracion.csv, 2026-01.csv, 202601.csv",
-        )
-        archivo_empleados = st.file_uploader(
-            "2️⃣ Listado de empleados (Rex+)", type=["xlsx"], key="up_empleados",
-            help="Se busca por Rut + Fecha inicio contrato para traer Empresa (col. BG) y Contrato (col. BE).",
-        )
-        archivo_lista = st.file_uploader(
-            "6️⃣ Lista de conceptos (Rex+)", type=["xlsx"], key="up_lista_conceptos",
-            help="Se valida que los aportes del empleador (aporteAFPemp, aporteFAPPCEV, aporteFAPPBAC, "
-                 "aportesegurocovid y sus reliquidaciones) no tengan Código LRE.",
-        )
-    with col2:
-        archivo_empresas = st.file_uploader("3️⃣ Listado de empresas (Rex+)", type=["xlsx"], key="up_empresas")
-        archivo_cot_hist = st.file_uploader(
-            "4️⃣ Cotizaciones históricas AFP y SIS", type=["xlsx"], key="up_cot_hist",
-            help="Columnas requeridas: id_afp_hist, cot_hist_afp, sis_hist.",
-        )
-        archivo_parametros = st.file_uploader(
-            "5️⃣ Parámetros mensuales", type=["xlsx"], key="up_parametros",
-            help="Una fila por mes (mes_Proc = yyyy-mm) con topes AFP, cesantía y salud.",
-        )
-
-    faltantes = [n for n, f in [("Archivos CSV de la DT", archivos), ("Listado de empleados", archivo_empleados),
-                                ("Listado de empresas", archivo_empresas),
-                                ("Cotizaciones históricas AFP y SIS", archivo_cot_hist),
-                                ("Parámetros mensuales", archivo_parametros),
-                                ("Lista de conceptos", archivo_lista)] if not f]
+    # ── Cargadores (siempre se dibujan, para que los archivos se mantengan)
+    archivos_up, espacios = _cargadores(paso, ronda, ui)
+    archivos = archivos_up["up_csv"]
+    archivo_empleados, archivo_empresas = archivos_up["up_empleados"], archivos_up["up_empresas"]
+    archivo_cot_hist, archivo_parametros = archivos_up["up_cot_hist"], archivos_up["up_parametros"]
+    archivo_lista = archivos_up["up_lista_conceptos"]
+    faltantes = [c[3] for c in CARGADORES if not archivos_up[c[0]]]
     if faltantes:
-        st.info("Esperando archivos: " + ", ".join(f"**{n}**" for n in faltantes))
+        paso = 1
+        st.session_state[CLAVE_PASO] = 1
+
+    with zona_enc:
+        if paso == 1:
+            ui.encabezado("Carga los archivos",
+                          "Sube los seis archivos. Cuando estén todos, revisa los datos con el botón de abajo.")
+    zona_pasos.empty()
+    with zona_pasos.container():
+        ui.indicador_pasos(paso)
+
+    if paso == 1:
+        espacios["_progreso"].empty()
+        with espacios["_progreso"].container():
+            ui.progreso(6 - len(faltantes), 6, faltantes)
+    if archivos:
+        chips = "".join(
+            f'<span class="rx-chip{"" if extraer_periodo(f.name) else " err"}">{ui.esc(f.name)} · '
+            f'{extraer_periodo(f.name) or "sin año-mes"}</span>' for f in archivos)
+        _estado_cargador(espacios, "up_csv", ui, chips)
+
+    if faltantes:
+        st.info("ℹ️ El nombre de cada CSV debe traer el año y el mes (por ejemplo **2026-07.csv**) y todos deben ser "
+                "del mismo año. Sube también los meses anteriores si hay licencias: se usan como historia.")
+        with st.expander("🏦 Instituciones que reconoce el programa: "
+                         + " · ".join(f"{h} {len(d)}" for h, d in instituciones.items())):
+            for hoja, df_inst in instituciones.items():
+                st.markdown(f"**{hoja}**")
+                st.dataframe(df_inst, use_container_width=True, hide_index=True)
+        st.button(f"Revisar datos (falta{'n' if len(faltantes) > 1 else ''} {len(faltantes)} archivo"
+                  f"{'s' if len(faltantes) > 1 else ''})", disabled=True, key="btn_revisar_off")
         return
 
-    # Archivos de referencia
+    # ── Lectura de archivos de referencia
     try:
         empleados = _leer_con_nombre(cargar_empleados, archivo_empleados)
         empresas = _leer_con_nombre(cargar_empresas, archivo_empresas)
@@ -1606,92 +1747,91 @@ def main():
         parametros = _leer_con_nombre(cargar_parametros, archivo_parametros)
         lista_conceptos = _leer_con_nombre(cargar_lista_conceptos, archivo_lista)
     except Exception as e:  # noqa: BLE001
+        st.session_state[CLAVE_PASO] = 1
         abortar(log, "Lectura de archivos de referencia",
                 f"No se pudo leer el archivo: {e}", getattr(e, "archivo_origen", ""), e)
+    _estado_cargador(espacios, "up_empleados", ui, f"{ui.esc(archivo_empleados.name)} · <b>{len(empleados)} empleados</b> leídos")
+    _estado_cargador(espacios, "up_empresas", ui, f"{ui.esc(archivo_empresas.name)} · <b>{len(empresas)} empresa(s)</b> leída(s)")
+    _estado_cargador(espacios, "up_cot_hist", ui, f"{ui.esc(archivo_cot_hist.name)} · <b>{len(cot_afp_hist)} tasas</b> leídas")
+    _estado_cargador(espacios, "up_parametros", ui, f"{ui.esc(archivo_parametros.name)} · <b>{len(parametros)} meses</b> leídos")
+    _estado_cargador(espacios, "up_lista_conceptos", ui, f"{ui.esc(archivo_lista.name)} · <b>{len(lista_conceptos)} conceptos</b> leídos")
     usadas = empleados.attrs.get("columnas_usadas", {})
+    log.info("Lectura de archivos de referencia", "Listado de empleados — columnas usadas: "
+             + ", ".join(f"{k} → '{v}'" for k, v in usadas.items()), archivo_empleados.name)
     for faltante in empleados.attrs.get("columnas_faltantes", []):
-        advertir(log, "Lectura de archivos de referencia",
-                 f"El listado de empleados no tiene la columna **'{faltante}'**; la columna del maestro "
-                 f"correspondiente quedará vacía.", archivo=getattr(archivo_empleados, "name", ""))
-    st.caption(
-        f"👥 Empleados: {len(empleados)} registros (columnas usadas: "
-        + ", ".join(f"{k} → '{v}'" for k, v in usadas.items())
-        + f") · 🏢 Empresas: {len(empresas)} · 📈 Cotizaciones AFP/SIS: {len(cot_afp_hist)}"
-        + f" · 📅 Parámetros: {len(parametros)} meses"
-    )
+        av.advertir("Lectura de archivos de referencia",
+                    f"El listado de empleados no tiene la columna **'{faltante}'**; ese dato quedará vacío en el maestro.",
+                    archivo=archivo_empleados.name)
 
-    # Validación inicial: aportes del empleador sin Código LRE en la Lista de conceptos
     con_codigo, no_encontrados = validar_conceptos_sin_lre(lista_conceptos)
     if con_codigo.empty:
-        st.success(f"✅ **Lista de conceptos:** ninguno de los {len(CONCEPTOS_SIN_LRE)} aportes del empleador "
-                   f"revisados tiene Código LRE asignado (lo esperado).")
         log.info("Validación Lista de conceptos",
                  "Ningún aporte del empleador revisado tiene Código LRE: " + ", ".join(CONCEPTOS_SIN_LRE),
                  archivo_lista.name)
     else:
-        st.error(f"❌ **Lista de conceptos:** {len(con_codigo)} aporte(s) del empleador tienen Código LRE asignado "
-                 f"y no deberían tenerlo: **{', '.join(con_codigo[COL_LC_CONCEPTO])}**.")
-        st.dataframe(con_codigo, use_container_width=True, hide_index=True)
-        st.download_button(
-            "⬇️ Descargar conceptos con Código LRE (.xlsx)",
-            data=excel_conceptos_con_lre(con_codigo),
-            file_name=f"conceptos_con_codigo_lre_{datetime.now():%Y%m%d_%H%M%S}.xlsx",
-            mime="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet",
-            key="dl_conceptos_lre",
-        )
         for _, fila in con_codigo.iterrows():
             log.error("Validación Lista de conceptos",
                       f"{fila[COL_LC_CONCEPTO]} tiene Código LRE '{fila[COL_LC_CODIGO_LRE]}' y no debería tenerlo.",
                       archivo_lista.name)
     if no_encontrados:
-        advertir(log, "Validación Lista de conceptos",
-                 f"Conceptos que no aparecen en la Lista de conceptos: **{', '.join(no_encontrados)}**.",
-                 archivo=archivo_lista.name)
+        av.advertir("Validación Lista de conceptos",
+                    f"Conceptos que no aparecen en la Lista de conceptos: **{', '.join(no_encontrados)}**.",
+                    archivo=archivo_lista.name)
 
-    # 1) Validar nombres — si uno falla, se aborta todo
+    # ── Validaciones de los CSV (si una falla, se detiene todo)
     validos, invalidos = validar_nombres(archivos)
     if invalidos:
+        st.session_state[CLAVE_PASO] = 1
         for n in invalidos:
             log.error("Validación de nombres", f"{MSG_NOMBRE_INVALIDO}: no incluye año-mes en el nombre.", n)
         abortar(log, "Validación de nombres",
                 f"**{MSG_NOMBRE_INVALIDO}.** Archivos sin año-mes en el nombre: " + ", ".join(f"`{n}`" for n in invalidos))
-
-    # 1b) Todos los archivos deben ser del mismo año — si no, se aborta todo
     por_anio = {}
     for f, periodo in validos:
         por_anio.setdefault(periodo[:4], []).append(f.name)
     if len(por_anio) > 1:
+        st.session_state[CLAVE_PASO] = 1
         for anio, nombres in sorted(por_anio.items()):
             log.error("Validación de año", f"{MSG_ANIOS_DISTINTOS}: archivo(s) del año {anio}.", ", ".join(nombres))
         abortar(log, "Validación de año",
                 f"**{MSG_ANIOS_DISTINTOS}.** Sube solo archivos de un mismo año. "
                 + " · ".join(f"{anio}: " + ", ".join(f"`{n}`" for n in sorted(nombres))
                              for anio, nombres in sorted(por_anio.items())))
-
-    # 2) Leer cada CSV (para identificar el archivo que falla) y consolidar
     for f, _ in validos:
         try:
             leer_archivo_dt(f)
         except Exception as e:  # noqa: BLE001
+            st.session_state[CLAVE_PASO] = 1
             abortar(log, "Lectura de CSV de la DT", f"Error en la estructura del archivo: {e}", f.name, e)
     try:
         df_cons, resumen = consolidar(validos, instituciones, cot_afp_hist, empleados, empresas, parametros)
     except Exception as e:  # noqa: BLE001
+        st.session_state[CLAVE_PASO] = 1
         abortar(log, "Consolidación", f"No se pudieron consolidar los archivos: {e}",
                 getattr(e, "archivo_origen", ""), e)
 
     df_resumen = pd.DataFrame(resumen)
     meses_subidos = sorted(df_cons[COL_MES_PROCESO].unique())
 
-    # Rango de meses a procesar (los meses fuera del rango solo sirven como historia)
-    mes_desde, mes_hasta = selector_rango_meses(meses_subidos)
+    # ── Encabezado de los pasos 2 a 5 con el rango de meses
+    titulos = {2: "Revisión de los datos", 3: "Maestro", 4: "Archivo de carga", 5: "Listo para cargar en Rex+"}
+    if paso == 1:
+        guardado = st.session_state.get(CLAVE_RANGO)
+        mes_desde, mes_hasta = (guardado if guardado and guardado[0] in meses_subidos and guardado[1] in meses_subidos
+                                else (meses_subidos[0], meses_subidos[-1]))
+    else:
+        with zona_enc:
+            c_t, c_r = st.columns([3, 2])
+            espacio_titulo = c_t.empty()
+            mes_desde, mes_hasta = _selector_meses(meses_subidos, c_r)
+
     en_rango = df_cons[COL_MES_PROCESO].between(mes_desde, mes_hasta)
     df_resumen["En el maestro"] = df_resumen[COL_MES_PROCESO].between(mes_desde, mes_hasta).map(
         {True: "Sí", False: "No (solo historia)"})
     faltan_csv = [str(p) for p in pd.period_range(mes_desde, mes_hasta, freq="M")
                   if str(p) not in set(meses_subidos)]
 
-    # Datos no encontrados: se piden solo para el rango; se aplican sobre todos los meses (historia)
+    # ── Cálculos (los mismos de siempre)
     pendientes = tabla_pendientes(df_cons[en_rango])
     claves_pend = {f"{d}|{r}" for d, r in zip(pendientes["Dato"], pendientes["Rut trabajador"])}
     manuales = {k: v for k, v in st.session_state.get(CLAVE_IMP_MANUAL, {}).items() if k in claves_pend}
@@ -1701,7 +1841,6 @@ def main():
     try:
         df_sin_cuad = df_cons
         df_cons = agregar_cuadratura_liquido(df_sin_cuad.copy(), tipos_lre)
-        # Ajuste compensaSobre: 5501 = 0 y cuadratura Totales DT negativa → se propone; se aplica con un botón
         casos_comp = casos_compensa_sobre(df_cons)
         firma_comp = firma_compensa(casos_comp) if not casos_comp.empty else ""
         ajuste_aplicado = bool(firma_comp) and st.session_state.get(CLAVE_COMPENSA) == firma_comp
@@ -1712,67 +1851,105 @@ def main():
     except Exception as e:  # noqa: BLE001
         abortar(log, "Cuadratura Total líquido (5501)", str(e), excepcion=e)
     meses = sorted(df_cons[COL_MES_PROCESO].unique())
+    col_rut = _buscar_col_rut(df_cons)
+    ruts = df_cons[col_rut].map(normalizar_rut)
+    n_trab = ruts.nunique()
 
+    # ── Avisos agrupados por tema (pantalla) + log
     if faltan_csv:
-        advertir(log, "Selección de meses",
-                 f"El rango {mes_desde} a {mes_hasta} incluye meses sin CSV subido: **{', '.join(faltan_csv)}**.")
-
-    # 3) Advertencias (en pantalla y en el log)
+        av.advertir("Selección de meses",
+                    f"El rango {mes_desde} a {mes_hasta} incluye meses sin CSV subido: **{', '.join(faltan_csv)}**.")
     for nombre_arch, cols in df_cons.attrs.get("columnas_descartadas", []):
-        advertir(log, "Lectura de CSV de la DT",
-                 f"`{nombre_arch}` trae columnas que no son de la DT y que genera el programa: "
-                 f"**{', '.join(cols)}**. Se descartaron las del archivo y se usaron las calculadas.",
-                 archivo=nombre_arch)
+        av.advertir("Lectura de CSV de la DT",
+                    f"`{nombre_arch}` trae columnas que genera el programa (**{', '.join(cols)}**); se descartaron "
+                    f"y se usaron las calculadas.", archivo=nombre_arch)
     duplicados = sorted(df_resumen.loc[df_resumen[COL_MES_PROCESO].duplicated(), COL_MES_PROCESO].unique())
     for mm in duplicados:
         arch = ", ".join(df_resumen.loc[df_resumen[COL_MES_PROCESO] == mm, "Archivo"])
-        advertir(log, "Consolidación", f"Hay más de un archivo para **{mm}**: {arch}. Revisa si alguno es una copia.")
+        av.advertir("Consolidación", f"Hay más de un archivo para **{mm}**: {arch}. Revisa si alguno es una copia.")
 
     emp_dup = df_cons.attrs.get("empleados_duplicados", [])
     if emp_dup:
-        advertir(log, "Cruce con listado de empleados",
-                 f"{len(emp_dup)} combinación(es) Rut + Fecha inicio contrato repetidas en el listado de empleados; "
-                 f"se usó la primera: **{', '.join(emp_dup[:10])}**{' …' if len(emp_dup) > 10 else ''}",
-                 f"{len(emp_dup)} combinación(es) Rut + Fecha inicio repetidas (se usó la primera): {', '.join(emp_dup)}",
-                 archivo_empleados.name)
-    sin_factor = df_cons[COL_FACTOR_CES].isna() if COL_FACTOR_CES in df_cons.columns else pd.Series(False, index=df_cons.index)
+        av.advertir("Cruce con listado de empleados",
+                    f"{len(emp_dup)} trabajador(es) aparecen repetidos en el listado de empleados (mismo Rut y fecha "
+                    f"de inicio); se usó la primera fila: **{', '.join(emp_dup[:10])}**{' …' if len(emp_dup) > 10 else ''}",
+                    f"{len(emp_dup)} combinación(es) Rut + Fecha inicio repetidas (se usó la primera): {', '.join(emp_dup)}",
+                    archivo_empleados.name)
+    emp_sin = df_cons.attrs.get("empleados_sin_match", [])
+    if emp_sin:
+        av.advertir("Cruce con listado de empleados",
+                    f"{len(emp_sin)} trabajador(es) no están en el listado de empleados con esa fecha de inicio de "
+                    f"contrato; quedan sin empresa, contrato ni jornada: **{', '.join(emp_sin[:10])}**"
+                    f"{' …' if len(emp_sin) > 10 else ''}",
+                    f"{len(emp_sin)} combinación(es) Rut + Fecha inicio no encontradas: {', '.join(emp_sin)}",
+                    archivo_empleados.name)
+        log.registros(df_cons, df_cons[COL_EMPRESA] == "",
+                      f"Rut + Fecha inicio contrato no existe en el listado de empleados ({COL_EMPRESA} y {COL_NUM_CONTRATO} vacías)")
+    sin_factor = (df_cons[COL_FACTOR_CES].isna() if COL_FACTOR_CES in df_cons.columns
+                  else pd.Series(False, index=df_cons.index))
     if sin_factor.any():
-        advertir(log, "Desglose AFC aporte empleador (4151)",
-                 f"{int(sin_factor.sum())} registro(s) sin tipo de contrato válido (I, F u O) en {COL_TIPO_CONTRATO} — "
-                 f"{COL_FACTOR_CES} y {COL_BASE_CES_CALC} quedaron vacías.")
+        av.advertir("Cruce con listado de empleados",
+                    f"{int(sin_factor.sum())} registro(s) sin tipo de contrato (I, F u O) en el listado de empleados: "
+                    f"no se puede separar el AFC del empleador (4151).",
+                    f"{int(sin_factor.sum())} registro(s) sin tipo de contrato válido en {COL_TIPO_CONTRATO} — "
+                    f"{COL_FACTOR_CES} y {COL_BASE_CES_CALC} vacías.")
         log.registros(df_cons, sin_factor,
                       f"{COL_TIPO_CONTRATO} vacío o distinto de I/F/O ({COL_FACTOR_CES} y {COL_BASE_CES_CALC} vacías)",
                       COL_TIPO_CONTRATO, "Tipo contrato: ")
-
-    emp_sin = df_cons.attrs.get("empleados_sin_match", [])
-    if emp_sin:
-        advertir(log, "Cruce con listado de empleados",
-                 f"{len(emp_sin)} combinación(es) Rut + Fecha inicio contrato no están en el listado de empleados — "
-                 f"{COL_EMPRESA}, {COL_NUM_CONTRATO}, {COL_HORAS_SEM}, {COL_TIPO_CONTRATO} y {COL_CAMBIO_INDEF} quedaron vacías: **{', '.join(emp_sin[:10])}**"
-                 f"{' …' if len(emp_sin) > 10 else ''}",
-                 f"{len(emp_sin)} combinación(es) Rut + Fecha inicio no encontradas: {', '.join(emp_sin)}",
-                 archivo_empleados.name)
-        log.registros(df_cons, df_cons[COL_EMPRESA] == "",
-                      f"Rut + Fecha inicio contrato no existe en el listado de empleados ({COL_EMPRESA} y {COL_NUM_CONTRATO} vacías)")
-
     id_sin = df_cons.attrs.get("id_empresa_sin_match", [])
     if id_sin:
-        advertir(log, "Cruce con listado de empresas",
-                 f"Empresas que no están en la columna Nombre del listado de empresas: **{', '.join(id_sin)}** — "
-                 f"{COL_ID_EMPRESA} quedó vacía para esos registros.", archivo=archivo_empresas.name)
+        av.advertir("Cruce con listado de empresas",
+                    f"Empresas que no están en el listado de empresas (columna Nombre): **{', '.join(id_sin)}**; "
+                    f"quedan sin código de empresa.", archivo=archivo_empresas.name)
         log.registros(df_cons, df_cons[COL_EMPRESA].isin(id_sin),
-                      f"Empresa no existe en Nombre del listado de empresas ({COL_ID_EMPRESA} vacía)",
-                      COL_EMPRESA, "Empresa: ")
-
+                      f"Empresa no existe en Nombre del listado de empresas ({COL_ID_EMPRESA} vacía)", COL_EMPRESA, "Empresa: ")
     emp_sin_mutual = df_cons.attrs.get("empresas_sin_match", [])
     if emp_sin_mutual:
-        advertir(log, "Cruce con listado de empresas",
-                 f"Empresas que no están en el listado de empresas: **{', '.join(emp_sin_mutual)}** — "
-                 f"{COL_PORC_MUTUAL} quedó vacía para esos registros.", archivo=archivo_empresas.name)
+        av.advertir("Cruce con listado de empresas",
+                    f"Empresas sin cotización de mutual en el listado de empresas: **{', '.join(emp_sin_mutual)}**.",
+                    archivo=archivo_empresas.name)
         log.registros(df_cons, df_cons[COL_EMPRESA].isin(emp_sin_mutual),
                       f"Empresa no existe en el listado de empresas ({COL_PORC_MUTUAL} vacía)", COL_EMPRESA, "Empresa: ")
+    if not (emp_dup or emp_sin or sin_factor.any() or id_sin or emp_sin_mutual):
+        av.ok(TEMAS[1], f"Los {n_trab} trabajador(es) se encontraron en el listado de empleados y su empresa en el "
+                        f"listado de empresas.")
 
-    # Datos no encontrados: ingreso manual (ventana emergente) — ya aplicados arriba
+    meses_sin_param = [mm for mm in meses if mm not in set(parametros["mes_Proc"])]
+    if meses_sin_param:
+        av.advertir("Parámetros mensuales",
+                    f"Meses sin fila en Parámetros mensuales: **{', '.join(meses_sin_param)}**; quedan sin topes ni "
+                    f"porcentajes.", archivo=archivo_parametros.name)
+        log.registros(df_cons, df_cons[COL_MES_PROCESO].isin(meses_sin_param),
+                      "Mes de proceso no existe en Parámetros mensuales (columnas de parámetros vacías)", COL_MES_PROCESO, "Mes: ")
+    else:
+        av.ok(TEMAS[3], f"Los {len(meses)} mes(es) tienen topes y porcentajes en Parámetros mensuales.")
+
+    hist_sin_match = df_cons.attrs.get("afp_hist_sin_match", [])
+    if hist_sin_match:
+        av.advertir("Cruce con cotizaciones históricas AFP/SIS",
+                    f"Mes + AFP sin tasa en cotizaciones históricas: **{', '.join(hist_sin_match)}**.",
+                    f"Mes + AFP sin tasa en cotizaciones históricas: {', '.join(hist_sin_match)} — {COL_PORC_AFP} y "
+                    f"{COL_SIS} vacías.", archivo_cot_hist.name)
+        log.registros(df_cons, df_cons[COL_PORC_AFP].isna() & (df_cons[COL_NOMBRE_AFP] != ""),
+                      f"Mes + AFP no existe en cotizaciones históricas ({COL_PORC_AFP} y {COL_SIS} vacías)",
+                      COL_NOMBRE_AFP, "AFP: ")
+    hubo_inst = False
+    for col_lre, hoja, _, _, col_nueva in [(COL_AFP_DT, "AFP", None, None, COL_NOMBRE_AFP)] + BUSQUEDAS_INSTITUCIONES:
+        sin_match = codigos_sin_match(df_cons, col_lre, col_nueva)
+        if sin_match:
+            hubo_inst = True
+            av.advertir("Cruce con Instituciones.xlsx",
+                        f"Códigos de {hoja.lower()} del LRE que el programa no conoce: **{', '.join(sin_match)}**. "
+                        f"Avisa al administrador del programa.",
+                        f"Códigos {col_lre} que no existen en Instituciones.xlsx (hoja {hoja}): {', '.join(sin_match)} — "
+                        f"{col_nueva} vacía.", "Instituciones.xlsx")
+            log.registros(df_cons, df_cons[col_nueva] == "",
+                          f"Código {col_lre} no existe en Instituciones.xlsx hoja {hoja} ({col_nueva} vacía)",
+                          _buscar_col_codigo(df_cons, col_lre), "Código: ")
+    if not (hist_sin_match or hubo_inst):
+        av.ok(TEMAS[2], "Todas las AFP, salud, cajas y mutuales del LRE se reconocieron, con sus tasas del mes.")
+
+    # Licencias y sueldos
     for clave, v in manuales.items():
         col_dato, rut = clave.split("|", 1)
         log.advertencia(DATOS_MANUALES[col_dato]["etiqueta"],
@@ -1781,95 +1958,29 @@ def main():
         mascara_man = pd.Series(False, index=df_cons.index)
         mascara_man.iloc[posiciones] = True
         log.registros(df_cons, mascara_man, f"{col_dato} ingresado manualmente", col_dato, "Valor: ")
-
-    if not pendientes.empty:
-        faltan = sum(int((df_cons[c] == i["texto"]).sum()) for c, i in DATOS_MANUALES.items())
-        resumen_pend = ", ".join(f"{g['Rut trabajador'].nunique()} Rut sin {e.lower()}"
-                                 for e, g in pendientes.groupby("Etiqueta", sort=False))
-        col_a, col_b = st.columns([3, 1])
-        col_a.info(f"✍️ {resumen_pend} — {len(manuales)} dato(s) ingresado(s) a mano, "
-                   f"{faltan} registro(s) aún pendientes.")
-        if col_b.button("✍️ Ingresar datos faltantes", use_container_width=True, key="btn_manual"):
-            ventana_manual(pendientes)
-
+    faltan_datos = sum(int((df_cons[c] == i["texto"]).sum()) for c, i in DATOS_MANUALES.items())
     for col_dato, info in DATOS_MANUALES.items():
         sin = df_cons[col_dato] == info["texto"]
         if sin.any():
-            motivo = ("con licencia sin un mes anterior sin licencia y sin sueldo de contrato"
-                      if col_dato == COL_ULT_IMP_SIN_LIC
-                      else "con días trabajados = 0 sin un mes anterior con días trabajados")
-            advertir(log, info["etiqueta"],
-                     f"{int(sin.sum())} registro(s) {motivo} — {col_dato} = '{info['texto']}' "
-                     f"(filas marcadas en amarillo en el Excel).")
+            log.advertencia(info["etiqueta"], f"{int(sin.sum())} registro(s) con {col_dato} = '{info['texto']}' "
+                                              f"(filas marcadas en amarillo en el Excel).")
             log.registros(df_cons, sin, f"{col_dato} = '{info['texto']}'",
                           _buscar_col_codigo(df_cons, COL_DIAS_LIC_DT), "Días licencia: ")
+    df_inf_lic = informe_licencias_sin_imponible(df_cons, sin_mes_ant, filas_manuales)
+    if not df_inf_lic.empty:
+        n_pend_inf = int((df_inf_lic[COL_ULT_IMP_SIN_LIC] == TXT_IMP_NO_ENCONTRADO).sum())
+        msg_inf = (f"{len(df_inf_lic)} registro(s) con licencia sin un mes anterior sin licencia: como último imponible "
+                   f"se usó el sueldo de contrato" + (f" ({n_pend_inf} aún sin sueldo)." if n_pend_inf else "."))
+        av.items[TEMAS[4]].append(("aviso", msg_inf + " Revísalos en el informe de licencias."))
+        log.info("Informe licencias sin último imponible", msg_inf)
+    n_no_val = df_cons.attrs.get("cuadratura_no_validados", 0)
+    if n_no_val:
+        av.nota(TEMAS[4], f"{n_no_val} registro(s) con licencia de mes completo (0 días trabajados): no entran en la "
+                          f"cuadratura del líquido.")
+    if df_inf_lic.empty and not n_no_val:
+        av.ok(TEMAS[4], "Todos los registros con licencia tienen un mes anterior sin licencia.")
 
-    meses_sin_param = [mm for mm in meses if mm not in set(parametros["mes_Proc"])]
-    if meses_sin_param:
-        advertir(log, "Parámetros mensuales",
-                 f"Meses sin fila en Parámetros mensuales: **{', '.join(meses_sin_param)}** — "
-                 f"las columnas de parámetros quedaron vacías para esos meses.",
-                 archivo=archivo_parametros.name)
-        log.registros(df_cons, df_cons[COL_MES_PROCESO].isin(meses_sin_param),
-                      "Mes de proceso no existe en Parámetros mensuales (columnas de parámetros vacías)",
-                      COL_MES_PROCESO, "Mes: ")
-
-    hist_sin_match = df_cons.attrs.get("afp_hist_sin_match", [])
-    if hist_sin_match:
-        advertir(log, "Cruce con cotizaciones históricas AFP/SIS",
-                 f"Mes + AFP sin tasa en cotizaciones históricas: **{', '.join(hist_sin_match)}** — "
-                 f"{COL_PORC_AFP} y {COL_SIS} quedaron vacías para esos registros.",
-                 archivo=archivo_cot_hist.name)
-        log.registros(df_cons, df_cons[COL_PORC_AFP].isna() & (df_cons[COL_NOMBRE_AFP] != ""),
-                      f"Mes + AFP no existe en cotizaciones históricas ({COL_PORC_AFP} y {COL_SIS} vacías)",
-                      COL_NOMBRE_AFP, "AFP: ")
-
-    for col_lre, hoja, _, _, col_nueva in [(COL_AFP_DT, "AFP", None, None, COL_NOMBRE_AFP)] + BUSQUEDAS_INSTITUCIONES:
-        sin_match = codigos_sin_match(df_cons, col_lre, col_nueva)
-        if sin_match:
-            advertir(log, "Cruce con Instituciones.xlsx",
-                     f"Códigos {col_lre} que no existen en Instituciones.xlsx (hoja {hoja}): "
-                     f"**{', '.join(sin_match)}** — la columna {col_nueva} quedó vacía para esos registros.",
-                     archivo="Instituciones.xlsx")
-            col_orig = _buscar_col_codigo(df_cons, col_lre)
-            log.registros(df_cons, df_cons[col_nueva] == "",
-                          f"Código {col_lre} no existe en Instituciones.xlsx hoja {hoja} ({col_nueva} vacía)",
-                          col_orig, "Código: ")
-
-    # Ajuste compensaSobre (Total líquido 5501 = 0 con cuadratura negativa)
-    if not casos_comp.empty:
-        n_comp, total_comp = len(casos_comp), int(casos_comp["compensaSobre propuesto"].sum())
-        monto_txt = f"{total_comp:,}".replace(",", ".")
-        vista_comp = casos_comp.drop(columns="_pos")
-        if not ajuste_aplicado:
-            st.warning(
-                f"⚖️ **{n_comp} registro(s) con Total líquido (5501) = 0 y cuadratura negativa** "
-                f"(los descuentos son mayores que los haberes).  \n"
-                f"**El sistema ofrece:** agregar el haber **compensaSobre** por la diferencia en positivo "
-                f"(total ${monto_txt}). Se guarda en la columna {COL_COMPENSA} del maestro y en la Etapa 2 "
-                f"genera una fila compensaSobre igual a cualquier otro haber. Con el ajuste, la cuadratura de "
-                f"esos registros queda en 0 y se vuelve a validar."
-            )
-            st.dataframe(vista_comp, use_container_width=True, hide_index=True)
-            st.button("✅ Aplicar ajuste", type="primary", key="btn_compensa",
-                      on_click=lambda f=firma_comp: st.session_state.__setitem__(CLAVE_COMPENSA, f))
-            log.advertencia("Ajuste compensaSobre",
-                            f"{n_comp} registro(s) con Total líquido (5501) = 0 y {COL_DIF_LIQ_TOT} negativo: "
-                            f"ajuste compensaSobre propuesto (total ${monto_txt}), NO aplicado.")
-        else:
-            st.success(f"⚖️ **Ajuste compensaSobre aplicado** — {n_comp} registro(s), total ${monto_txt}. "
-                       f"Cuadratura revalidada (resultado abajo).")
-            with st.expander("Ver registros ajustados"):
-                st.dataframe(vista_comp, use_container_width=True, hide_index=True)
-            st.button("↩️ Deshacer ajuste", key="btn_compensa_deshacer",
-                      on_click=lambda: st.session_state.pop(CLAVE_COMPENSA, None))
-            log.info("Ajuste compensaSobre", f"Ajuste aplicado a {n_comp} registro(s): compensaSobre total ${monto_txt}.")
-            mascara_comp = pd.Series(False, index=df_cons.index)
-            mascara_comp.iloc[casos_comp["_pos"].tolist()] = True
-            log.registros(df_cons, mascara_comp, "Ajuste compensaSobre aplicado (5501 = 0, cuadratura negativa)",
-                          COL_COMPENSA, "compensaSobre: ")
-
-    # Cuadratura del Total líquido (5501)
+    # Cuadraturas
     formulas = {
         COL_DIF_LIQ_TOT: "Totales DT (5210+5220+5230+5240−5301)",
         COL_DIF_LIQ_DET: "Detalle por Tipo (Haber afecto + Haber exento − Descuento − Descuento Legal)",
@@ -1878,100 +1989,298 @@ def main():
         dif = pd.to_numeric(df_cons[col_dif], errors="coerce")
         malos = dif.abs() > TOLERANCIA_LIQ
         if malos.any():
-            advertir(log, "Cuadratura Total líquido (5501)",
-                     f"{int(malos.sum())} registro(s) no cuadran: {formula} ≠ Total líquido (5501). "
-                     f"La diferencia está en {col_dif} (celdas en rojo en el Excel).")
+            av.advertir("Cuadratura Total líquido (5501)",
+                        f"{int(malos.sum())} registro(s) no cuadran con el Total líquido (5501) según la fórmula "
+                        f"**{formula}** (celdas en rojo en el Excel).",
+                        f"{int(malos.sum())} registro(s) no cuadran: {formula} ≠ Total líquido (5501). "
+                        f"Diferencia en {col_dif}.")
             log.registros(df_cons, malos, f"{formula} ≠ Total líquido (5501)", col_dif, "Diferencia: ")
-    validados = int(pd.to_numeric(df_cons[COL_DIF_LIQ_TOT], errors="coerce").notna().sum())
-    cuadran = all(
-        (lambda d: (d.isna() | (d.abs() <= TOLERANCIA_LIQ)).all())(pd.to_numeric(df_cons[c], errors="coerce"))
-        for c in formulas
-    )
-    if validados and cuadran:
-        msg = (f"Cuadratura del Total líquido (5501): {validados} registro(s) validados, "
-               f"todos cuadran con ambas fórmulas.")
-        st.success(f"✅ {msg}")
+    dif_t = pd.to_numeric(df_cons[COL_DIF_LIQ_TOT], errors="coerce")
+    dif_d = pd.to_numeric(df_cons[COL_DIF_LIQ_DET], errors="coerce")
+    validados = int(dif_t.notna().sum())
+    cuadran_n = int((dif_t.notna() & (dif_t.abs() <= TOLERANCIA_LIQ) & (dif_d.abs() <= TOLERANCIA_LIQ)).sum())
+    if validados and cuadran_n == validados:
+        msg = f"Total líquido (5501): {validados} registro(s) validados, todos cuadran con ambas fórmulas."
+        av.ok(TEMAS[5], msg)
         log.info("Cuadratura Total líquido (5501)", msg)
     sin_tipo = df_cons.attrs.get("cols_sin_tipo", {})
     if sin_tipo:
-        advertir(log, "Cuadratura Total líquido (5501)",
-                 "Columnas con montos que no están clasificadas en equiv_conceptos.xlsx (no entran en la "
-                 "cuadratura por detalle): **" + ", ".join(f"{c} ({n} reg.)" for c, n in sin_tipo.items()) + "**",
-                 archivo="equiv_conceptos.xlsx")
-    # Validación del desglose del AFC aporte empleador: 4151 = cesAporteCi + cesAporteSol
+        av.advertir("Cuadratura Total líquido (5501)",
+                    "Columnas con montos que el programa no sabe si son haber o descuento (no entran en la cuadratura "
+                    "por detalle): **" + ", ".join(f"{c} ({n} reg.)" for c, n in sin_tipo.items()) + "**. "
+                    "Avisa al administrador.", archivo="equiv_conceptos.xlsx")
+    validados_ces, ok_ces = 0, 0
     if COL_CES_APORTE_CI in df_cons.columns:
         dif_ces = diferencia_ces(df_cons)
         validados_ces = int(dif_ces.notna().sum())
         malos_ces = dif_ces.notna() & (dif_ces.abs() > TOLERANCIA_CES)
+        ok_ces = validados_ces - int(malos_ces.sum())
         if malos_ces.any():
-            advertir(log, "Desglose AFC aporte empleador (4151)",
-                     f"{int(malos_ces.sum())} registro(s) no cuadran: {COL_CES_APORTE_CI} + {COL_CES_APORTE_SOL} ≠ "
-                     f"AFC - Aporte empleador (4151) (celdas en rojo en el Excel).")
+            av.advertir("Desglose AFC aporte empleador (4151)",
+                        f"{int(malos_ces.sum())} registro(s): el AFC del empleador (4151) no es igual a la suma de "
+                        f"sus partes (celdas en rojo en el Excel).",
+                        f"{int(malos_ces.sum())} registro(s) no cuadran: {COL_CES_APORTE_CI} + {COL_CES_APORTE_SOL} ≠ 4151.")
             df_cons["_dif_ces"] = dif_ces
-            log.registros(df_cons, malos_ces, f"{COL_CES_APORTE_CI} + {COL_CES_APORTE_SOL} ≠ 4151",
-                          "_dif_ces", "Diferencia: ")
+            log.registros(df_cons, malos_ces, f"{COL_CES_APORTE_CI} + {COL_CES_APORTE_SOL} ≠ 4151", "_dif_ces", "Diferencia: ")
             df_cons.drop(columns="_dif_ces", inplace=True)
         elif validados_ces:
-            msg = (f"Desglose AFC aporte empleador (4151): {validados_ces} registro(s) validados, "
-                   f"todos cuadran ({COL_CES_APORTE_CI} + {COL_CES_APORTE_SOL} = 4151).")
-            st.success(f"✅ {msg}")
+            msg = f"AFC aporte empleador (4151): {validados_ces} registro(s) validados, todos cuadran."
+            av.ok(TEMAS[5], msg)
             log.info("Desglose AFC aporte empleador (4151)", msg)
 
-    n_no_val = df_cons.attrs.get("cuadratura_no_validados", 0)
-    if n_no_val:
-        st.caption(f"ℹ️ Cuadratura del Total líquido: {n_no_val} registro(s) con días trabajados (1115) = 0 "
-                   f"no se validan ({COL_DIF_LIQ_TOT} y {COL_DIF_LIQ_DET} quedan vacías).")
+    # Ajuste compensaSobre (log)
+    n_comp = len(casos_comp)
+    total_comp = int(casos_comp["compensaSobre propuesto"].sum()) if n_comp else 0
+    if n_comp and not ajuste_aplicado:
+        log.advertencia("Ajuste compensaSobre",
+                        f"{n_comp} registro(s) con Total líquido (5501) = 0 y {COL_DIF_LIQ_TOT} negativo: ajuste "
+                        f"compensaSobre propuesto (total ${_miles(total_comp)}), NO aplicado.")
+    elif n_comp:
+        log.info("Ajuste compensaSobre", f"Ajuste aplicado a {n_comp} registro(s): compensaSobre total ${_miles(total_comp)}.")
+        mascara_comp = pd.Series(False, index=df_cons.index)
+        mascara_comp.iloc[casos_comp["_pos"].tolist()] = True
+        log.registros(df_cons, mascara_comp, "Ajuste compensaSobre aplicado (5501 = 0, cuadratura negativa)",
+                      COL_COMPENSA, "compensaSobre: ")
 
-    st.success(
-        f"✅ **Maestro armado** — {len(df_cons)} registros — meses: **{', '.join(meses)}**"
-        + (f" (de {len(meses_subidos)} mes(es) subidos; el resto se usó solo como historia)"
-           if len(meses) < len(meses_subidos) else "")
-    )
-    st.dataframe(df_resumen, use_container_width=True, hide_index=True)
+    # Etapa 2 (se calcula siempre; se muestra en el paso 4 y se descarga en el paso 5)
+    res_e2 = calcular_etapa2(df_cons, con_codigo, log)
 
-    with st.expander("👁️ Vista previa del maestro"):
-        previa = df_cons.head(100).copy()
-        for col_dato in list(DATOS_MANUALES) + [COL_IMP_MES_ANT_LIC, COL_IMPONIBLE_LIC,
-                                                 COL_IMPO_VALIDADO, COL_BASECES_VALIDADO]:
-            previa[col_dato] = previa[col_dato].map(lambda v: "" if v is None else str(v))
-        vista = previa.style.set_properties(
-            subset=[c for c in COLUMNAS_NUEVAS if c in df_cons.columns],
-            **{"background-color": f"#{VERDE_CLARO}"}
-        )
-        st.dataframe(vista, use_container_width=True, hide_index=True)
+    # Acciones pendientes: (clave, resuelta)
+    acciones = [("conceptos", con_codigo.empty)]
+    if not pendientes.empty:
+        acciones.append(("manuales", faltan_datos == 0))
+    if n_comp:
+        acciones.append(("compensa", ajuste_aplicado))
+    n_pend_acc = sum(1 for _, ok in acciones if not ok)
 
-    st.download_button(
-        "⬇️ Descargar maestro (.xlsx)",
-        data=generar_excel(df_cons, filas_manuales),
-        file_name=nombre_archivo_maestro(mes_desde, mes_hasta, meses_subidos),
-        mime="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet",
-    )
-
-    # Informe: registros con licencia (1116 > 0) sin último imponible sin licencia
-    df_inf_lic = informe_licencias_sin_imponible(df_cons, sin_mes_ant, filas_manuales)
-    if df_inf_lic.empty:
-        st.caption("ℹ️ Todos los registros con licencia (1116 > 0) tienen un mes anterior sin licencia "
-                   f"para {COL_ULT_IMP_SIN_LIC}.")
+    # ── Encabezado común
+    empresas_txt = ", ".join(sorted({str(e) for e in df_cons[COL_EMPRESA] if str(e).strip()})) or "Empresa sin cruce"
+    sub = f"{empresas_txt} · {len(archivos)} CSV de la DT · {mes_desde} a {mes_hasta}"
+    if paso == 1:
+        pass
     else:
-        n_pend = int((df_inf_lic[COL_ULT_IMP_SIN_LIC] == TXT_IMP_NO_ENCONTRADO).sum())
-        msg_inf = (f"{len(df_inf_lic)} registro(s) con licencia (1116 > 0) sin un mes anterior sin licencia: "
-                   f"{COL_ULT_IMP_SIN_LIC} se tomó del sueldo de contrato"
-                   + (f" ({n_pend} aún pendiente(s))." if n_pend else "."))
-        st.info(f"🩺 {msg_inf}")
-        log.info("Informe licencias sin último imponible", msg_inf)
-        st.download_button(
-            "⬇️ Descargar informe de licencias sin último imponible (.xlsx)",
-            data=excel_informe_licencias(df_inf_lic),
-            file_name=nombre_archivo_maestro(mes_desde, mes_hasta, meses_subidos).replace(
-                "maestro_lre_dt_", "licencias_sin_ult_imponible_"),
-            mime="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet",
-            key="dt_informe_licencias",
-        )
-    # Etapa 2 — Creación de archivo de carga de liquidaciones (migracion_lre_dt_etapa2.py)
-    from migracion_lre_dt_etapa2 import seccion_etapa2  # noqa: E402  (import tardío: evita import circular)
-    seccion_etapa2(df_cons, con_codigo, log, mes_desde, mes_hasta)
+        with espacio_titulo.container():
+            ui.encabezado(titulos[paso], sub)
 
-    boton_log(log, "dt_log_final")
+    # ── PASO 1: Archivos listos
+    if paso == 1:
+        st.success(f"✅ Los seis archivos están cargados: {len(df_cons)} registros de {len(meses_subidos)} mes(es) "
+                   f"({meses_subidos[0]} a {meses_subidos[-1]}).")
+        with st.expander("🏦 Instituciones que reconoce el programa: "
+                         + " · ".join(f"{h} {len(d)}" for h, d in instituciones.items())):
+            for hoja, df_inst in instituciones.items():
+                st.markdown(f"**{hoja}**")
+                st.dataframe(df_inst, use_container_width=True, hide_index=True)
+        _navegacion(1, 2, "Revisar datos →", clave="p1")
+        return
+
+    # ── PASO 2: Revisión
+    if paso == 2:
+        con_emp = int(df_cons.loc[df_cons[COL_EMPRESA] != "", col_rut].map(normalizar_rut).nunique())
+        ui.tarjetas_resumen([
+            ("Registros", _miles(len(df_cons)), f"{len(meses)} mes(es) · {n_trab} trabajador(es)", ""),
+            ("Cruce con Rex+", f"{con_emp} / {n_trab}",
+             "Todos encontrados" if con_emp == n_trab else f"{n_trab - con_emp} sin cruce",
+             "ok" if con_emp == n_trab else "warn"),
+            ("Cuadratura líquido", f"{cuadran_n} / {validados}",
+             "Cuadra" if cuadran_n == validados else f"{validados - cuadran_n} por revisar",
+             "ok" if cuadran_n == validados else "warn"),
+            ("AFC empleador (4151)", f"{ok_ces} / {validados_ces}",
+             "Cuadra" if ok_ces == validados_ces else f"{validados_ces - ok_ces} por revisar",
+             "ok" if ok_ces == validados_ces else "warn"),
+            ("Por resolver", str(n_pend_acc), "acciones pendientes" if n_pend_acc else "nada pendiente",
+             "warn-card" if n_pend_acc else "ok"),
+        ])
+
+        with st.container(border=True):
+            c1, c2 = st.columns([4, 1])
+            with c1:
+                ui.titulo_seccion("Acciones pendientes",
+                                  "Resuélvelas antes de generar el archivo de carga. Cada una pasa a verde al completarla.")
+            c2.markdown(f'<div style="text-align:right;padding-top:8px">'
+                        f'{ui.pill(f"{n_pend_acc} de {len(acciones)} pendientes" if n_pend_acc else "Todo resuelto", "warn" if n_pend_acc else "ok")}'
+                        f'</div>', unsafe_allow_html=True)
+            for clave_acc, resuelta in acciones:
+                st.divider()
+                if clave_acc == "conceptos":
+                    if resuelta:
+                        ui.item("Lista de conceptos de Rex+ correcta",
+                                f"Ninguno de los {len(CONCEPTOS_SIN_LRE)} aportes del empleador tiene Código LRE.", "ok")
+                    else:
+                        a, b = st.columns([3, 1])
+                        with a:
+                            ui.item(f"{len(con_codigo)} aporte(s) del empleador tienen Código LRE en la Lista de conceptos",
+                                    f"**{', '.join(con_codigo[COL_LC_CONCEPTO])}** no debería tener código. Pide que se lo "
+                                    f"quiten en Rex+, vuelve a exportar la lista y súbela en el archivo 6.", "err", "lista")
+                        b.download_button("Descargar lista", data=excel_conceptos_con_lre(con_codigo),
+                                          file_name=f"conceptos_con_codigo_lre_{datetime.now():%Y%m%d_%H%M%S}.xlsx",
+                                          mime="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet",
+                                          key="dl_conceptos_lre", use_container_width=True)
+                        with st.expander("Ver conceptos con código"):
+                            st.dataframe(con_codigo, use_container_width=True, hide_index=True)
+                elif clave_acc == "manuales":
+                    n_rut = pendientes["Rut trabajador"].nunique()
+                    ruts_txt = ", ".join(sorted(pendientes["Rut trabajador"].unique())[:5])
+                    a, b = st.columns([3, 1])
+                    with a:
+                        if resuelta:
+                            ui.item(f"Sueldo de contrato ingresado para {n_rut} trabajador(es)",
+                                    f"{ruts_txt}. Puedes modificarlo si te equivocaste.", "ok")
+                        else:
+                            ui.item(f"Falta el sueldo de contrato de {n_rut} trabajador(es)",
+                                    f"**{ruts_txt}** estuvo con licencia en todos los meses subidos. Sin su sueldo no se "
+                                    f"puede calcular el imponible de {faltan_datos} registro(s).", "warn", "persona")
+                    if b.button("Modificar" if resuelta else "Ingresar sueldo", key="btn_manual",
+                                type="secondary" if resuelta else "primary", use_container_width=True):
+                        ventana_manual(pendientes)
+                elif clave_acc == "compensa":
+                    fila = casos_comp.iloc[0]
+                    detalle_1 = (f"Rut {fila['Rut trabajador']}, {fila[COL_MES_PROCESO]}: haberes "
+                                 f"${_miles(fila['Total haberes (5210+5220+5230+5240)'])}, descuentos "
+                                 f"${_miles(fila['Total descuentos (5301)'])}." if n_comp == 1 else
+                                 f"{n_comp} registros con Total líquido (5501) = 0 y más descuentos que haberes.")
+                    a, b = st.columns([3, 1])
+                    with a:
+                        if resuelta:
+                            ui.item(f"Ajuste compensaSobre aplicado ({n_comp} registro(s), ${_miles(total_comp)})",
+                                    "La cuadratura se volvió a validar. En el archivo de carga va una fila compensaSobre "
+                                    "por cada registro ajustado.", "ok")
+                        else:
+                            ui.item("Líquido en cero con más descuentos que haberes",
+                                    f"{detalle_1} Se propone agregar el haber **compensaSobre** por "
+                                    f"**${_miles(total_comp)}** para que cuadre.", "warn", "balanza")
+                    if resuelta:
+                        b.button("Deshacer ajuste", key="btn_compensa_deshacer", use_container_width=True,
+                                 on_click=lambda: st.session_state.pop(CLAVE_COMPENSA, None))
+                    else:
+                        b.button("Aplicar ajuste", type="primary", key="btn_compensa", use_container_width=True,
+                                 on_click=lambda f=firma_comp: st.session_state.__setitem__(CLAVE_COMPENSA, f))
+                    with st.expander(f"Ver detalle ({n_comp} registro(s))"):
+                        st.dataframe(casos_comp.drop(columns="_pos"), use_container_width=True, hide_index=True)
+
+        st.write("")
+        ui.titulo_seccion("Revisiones por tema", "El detalle técnico de cada revisión queda en el log de errores (paso 5).")
+        for tema in TEMAS:
+            items = av.items[tema]
+            n_av = av.n_avisos(tema)
+            if not items:
+                continue
+            etiqueta = f"⚠️ {tema} — {n_av} aviso(s)" if n_av else f"✅ {tema} — sin problemas"
+            with st.expander(etiqueta, expanded=False):
+                for tipo, texto in items:
+                    icono = {"aviso": "⚠️", "ok": "✅", "nota": "ℹ️"}[tipo]
+                    st.markdown(f"{icono} {texto}")
+                if tema == TEMAS[4] and not df_inf_lic.empty:
+                    st.download_button(
+                        "⬇️ Descargar informe de licencias",
+                        data=excel_informe_licencias(df_inf_lic),
+                        file_name=nombre_archivo_maestro(mes_desde, mes_hasta, meses_subidos).replace(
+                            "maestro_lre_dt_", "licencias_sin_ult_imponible_"),
+                        mime="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet",
+                        key="dl_informe_lic_tema")
+        _navegacion(2, 3, "Continuar al maestro →", clave="p2")
+        return
+
+    # ── PASO 3: Maestro
+    if paso == 3:
+        ui.banner(f"Maestro armado: {_miles(len(df_cons))} registros",
+                  f"Meses {', '.join(meses)}"
+                  + (f" · los otros {len(meses_subidos) - len(meses)} mes(es) subidos se usaron solo como historia"
+                     if len(meses) < len(meses_subidos) else "")
+                  + (f" · {n_pend_acc} acción(es) pendiente(s) en la revisión" if n_pend_acc else ""),
+                  "warn" if n_pend_acc else "ok")
+        ui.titulo_seccion("Archivos de la DT incluidos")
+        st.dataframe(df_resumen, use_container_width=True, hide_index=True)
+        with st.expander("👁️ Vista previa del maestro (primeras 100 filas; en verde, las columnas del programa)"):
+            previa = df_cons.head(100).copy()
+            for col_dato in list(DATOS_MANUALES) + [COL_IMP_MES_ANT_LIC, COL_IMPONIBLE_LIC,
+                                                     COL_IMPO_VALIDADO, COL_BASECES_VALIDADO]:
+                previa[col_dato] = previa[col_dato].map(lambda v: "" if v is None else str(v))
+            vista = previa.style.set_properties(
+                subset=[c for c in COLUMNAS_NUEVAS if c in df_cons.columns],
+                **{"background-color": f"#{VERDE_CLARO}"})
+            st.dataframe(vista, use_container_width=True, hide_index=True)
+        st.caption("El maestro se descarga en el paso 5, junto con los demás archivos.")
+        _navegacion(3, 4, "Continuar al archivo de carga →", clave="p3")
+        return
+
+    # ── PASO 4: Archivo de carga
+    if paso == 4:
+        mostrar_etapa2(res_e2, mes_desde, mes_hasta)
+        st.caption("El archivo de carga se descarga en el paso 5.")
+        _navegacion(4, 5 if res_e2["estado"] != "error" else None, "Continuar a descargas →", clave="p4")
+        return
+
+    # ── PASO 5: Descargas
+    if res_e2["estado"] == "error":
+        ui.banner("No se pudo generar el archivo de carga", res_e2["mensaje"], "err")
+    else:
+        df_carga = res_e2["df_carga"]
+        extras = []
+        if n_comp and ajuste_aplicado:
+            extras.append(f"{n_comp} ajuste(s) compensaSobre")
+        if manuales:
+            extras.append(f"{len(manuales)} sueldo(s) ingresado(s) a mano")
+        detalle = (f"{_miles(len(df_carga))} filas · {df_carga['Id empleado'].nunique()} trabajador(es) · "
+                   f"{len(meses)} mes(es)" + ("".join(f" · {x}" for x in extras)))
+        if res_e2["estado"] == "ok":
+            ui.banner("Archivo de carga generado sin observaciones", detalle, "ok")
+        else:
+            ui.banner(f"Archivo de carga generado con {len(res_e2['problemas'])} observación(es)",
+                      detalle + " · revisa el paso 4 antes de importar", "warn")
+
+    nombre_maestro = nombre_archivo_maestro(mes_desde, mes_hasta, meses_subidos)
+    nombre_inf = nombre_maestro.replace("maestro_lre_dt_", "licencias_sin_ult_imponible_")
+    nombre_log = f"log_errores_lre_dt_{datetime.now():%Y%m%d_%H%M%S}.xlsx"
+    datos_maestro = generar_excel(df_cons, filas_manuales)
+    datos_log = log.excel()
+    descargas = []   # (etiqueta, clase, nombre, descripción, archivo, datos, principal)
+    if res_e2["estado"] != "error":
+        nombre_carga = nombre_archivo_carga(mes_desde, mes_hasta)
+        descargas.append(("Para importar en Rex+", "main", "Archivo de carga de liquidaciones",
+                          "Una fila por concepto, trabajador y mes, en el formato de liquidaciones en detalle.",
+                          nombre_carga, excel_carga(res_e2["df_carga"], res_e2["marcadas"]), True))
+    descargas.append(("Respaldo", "info", "Maestro",
+                      "Todos los meses juntos, con las columnas que agregó el programa en verde.",
+                      nombre_maestro, datos_maestro, False))
+    if not df_inf_lic.empty:
+        descargas.append((f"Para revisar · {len(df_inf_lic)} registro(s)", "warn",
+                          "Informe de licencias sin último imponible",
+                          "Registros con licencia en que se usó el sueldo de contrato.",
+                          nombre_inf, excel_informe_licencias(df_inf_lic), False))
+    n_err = sum(1 for r in log.resumen if r["Tipo"] == "ERROR")
+    n_adv = sum(1 for r in log.resumen if r["Tipo"] == "ADVERTENCIA")
+    descargas.append((f"Respaldo · {n_err} error(es), {n_adv} advertencia(s)", "info", "Log de errores",
+                      "Todo lo que el programa revisó, con el detalle técnico por trabajador y mes.",
+                      nombre_log, datos_log, False))
+
+    import zipfile
+    zbuf = io.BytesIO()
+    with zipfile.ZipFile(zbuf, "w", zipfile.ZIP_DEFLATED) as z:
+        for *_, archivo_n, datos, _p in descargas:
+            z.writestr(archivo_n, datos)
+    c1, c2 = st.columns([3, 1])
+    with c1:
+        ui.titulo_seccion("Tus archivos")
+    c2.download_button("⬇️ Descargar todo (.zip)", data=zbuf.getvalue(),
+                       file_name=f"migracion_lre_dt_{mes_desde}_a_{mes_hasta}_{datetime.now():%Y%m%d_%H%M%S}.zip",
+                       mime="application/zip", type="primary", key="dl_zip", use_container_width=True)
+    cols = st.columns(2)
+    for i, (etq, clase, nombre, desc, archivo_n, datos, principal) in enumerate(descargas):
+        with cols[i % 2]:
+            with st.container(border=True):
+                ui.tarjeta_descarga(etq, clase, nombre, desc, archivo_n)
+                st.download_button("⬇️ Descargar", data=datos, file_name=archivo_n,
+                                   mime="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet",
+                                   type="primary" if principal else "secondary", key=f"dl_final_{i}")
+    if res_e2["estado"] != "error":
+        with st.expander(f"📊 Resumen por concepto ({len(res_e2['resumen'])} conceptos)"):
+            st.dataframe(res_e2["resumen"], use_container_width=True, hide_index=True)
+    st.warning("⚠️ Descarga los archivos antes de salir: los sueldos ingresados a mano y el ajuste compensaSobre "
+               "se pierden al cerrar o recargar la página.")
+    c1, _, c3 = st.columns([1.4, 1, 1.4])
+    c1.button("← Volver a Archivo de carga", key="nav_back_p5", on_click=_ir_a, args=(4,), use_container_width=True)
+    c3.button("Empezar otra migración", key="nav_otra", on_click=_empezar_otra, use_container_width=True)
 
 
 if __name__ == "__main__":
