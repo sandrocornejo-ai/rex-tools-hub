@@ -11,7 +11,7 @@ Reglas: ver claude/especificacion_etapa2_migracion_lre_dt.md (proyecto) — resu
     1116 no genera concepto: se agrega la fila licenciaDias.
   - Conceptos calculados: aporteAFPemp, aporteFAPPCEV, aporteFAPPBAC (no si 1146 = 1 o 1109 = 1) y
     cajaComp (solo FONASA 1143 = 102 con CCAF 1110 ≠ 0; no si 1146 = 1). Base: impo_validado_entrada.
-  - Filas con monto 0: se omiten salvo impuesto y cesEmpleado. Licencia mes completo (1115 = 0): solo la
+  - Filas con monto 0: se omiten salvo impuesto, cesEmpleado y totalesEmpl. Licencia mes completo (1115 = 0): solo la
     lista LICENCIA_MES_COMPLETO, aunque vengan en 0.
   - Afecto, Id de institución, Cotización de jubilación, Parcial 7 y Parcial 8 por concepto (tablas abajo).
 """
@@ -42,7 +42,7 @@ COD_4151 = "4151"            # AFC aporte empleador → dos filas (cesAporteCi /
 COD_DIAS_LIC = "1116"        # Dato: no genera concepto; se agrega la fila licenciaDias
 DESTINO_CODIGO = {"4154": "trabajoPesa", "4152": "mutual", "4155": "sis"}   # códigos con varios conceptos
 
-CONCEPTOS_SIEMPRE = {"impuesto", "cesEmpleado"}
+CONCEPTOS_SIEMPRE = {"impuesto", "cesEmpleado", "totalesEmpl"}   # totalesEmpl (5501) siempre, aunque el líquido sea 0
 LICENCIA_MES_COMPLETO = ["sueldoBase", "gratificacion", "afp", "isapre", "cesEmpleado", "impuesto",
                          "totalesEmpl", "mutual", "sis", "cesAporteSol", "cesAporteCi"]
 CALCULADOS_EMPLEADOR = {   # concepto → columna del maestro con la tasa del mes (en %)
