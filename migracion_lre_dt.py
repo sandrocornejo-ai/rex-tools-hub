@@ -28,6 +28,7 @@ from datetime import datetime
 
 import pandas as pd
 import streamlit as st
+from openpyxl import Workbook
 from openpyxl.styles import Alignment, Font, PatternFill
 
 # ─────────────────────────────────────────────
@@ -94,6 +95,13 @@ DATOS_MANUALES = {
 }
 NARANJO_CLARO = "FCE4D6"                # celda ultImpSinLic_entrada ingresada manualmente
 CLAVE_IMP_MANUAL = "imponibles_manuales"  # st.session_state: {rut normalizado: imponible}
+# Último imponible sin licencia ingresado por el usuario (registros con licencia sin mes anterior sin licencia)
+CLAVE_ULT_IMP_MANUAL = "ult_imp_manuales"   # st.session_state: {rut normalizado: último imponible sin licencia}
+CLAVE_ULT_IMP_MODO = "ult_imp_modo"         # st.session_state: None (sin elegir) | "manual" | "contrato"
+FILAS_ULT_IMP_MANUAL = "__ult_imp_manual__"  # clave interna de filas_manuales (posiciones con imponible ingresado)
+COL_PLANT_RUT = "Rut trabajador"
+COL_PLANT_ULT_IMP = "Último imponible sin licencia"
+ORIGEN_ULT_IMP_MANUAL = "Último imponible ingresado manualmente (con tope)"
 CODIGOS_REBAJA_LLSS = ["(3141)", "(3143)", "(3151)", "(3156)", "(3158)", "(3167)", "(3154)"]
 
 # Validación inicial de la Lista de conceptos (Rex+): estos aportes del empleador NO deben tener Código LRE
@@ -939,13 +947,15 @@ def calcular_sueldo_contrato(df):
     return pd.Series(resultado, index=df.index, dtype=object)
 
 
-def calcular_ult_imp_sin_lic(df):
+def calcular_ult_imp_sin_lic(df, manuales_ult=None):
     """
+    manuales_ult: {rut normalizado: último imponible sin licencia ingresado por el usuario} (opcional).
     Último mes imponible sin licencia, por registro:
       - Si el registro tiene licencia (1116 > 0): se busca el mismo Rut en el mes anterior; si ese mes
         no tiene licencia (1116 = 0) → min(5210 + 5220, topeimp_entrada) de ese mes. Si también tiene licencia,
         o el Rut no aparece ese mes, se sigue hacia atrás.
-        Si no se encuentra ninguno → min(sueldoContrato_entrada, topeimp_entrada) del mismo registro.
+        Si no se encuentra ninguno: si el usuario ingresó el último imponible del Rut → min(valor ingresado,
+        topeimp_entrada); si no → min(sueldoContrato_entrada, topeimp_entrada) del mismo registro.
         Si el sueldo tampoco se encontró ('sueldo no encontrado') → 'imponible no encontrado'
         (se resuelve al ingresar el sueldo de contrato a mano en la ventana emergente; también se topa).
       - Si el registro no tiene licencia (1116 = 0): queda vacío.
@@ -976,8 +986,12 @@ def calcular_ult_imp_sin_lic(df):
         if dl <= 0:
             resultado.append(None)
             continue
-        # Sin mes anterior sin licencia → sueldo de contrato del mismo registro, con tope del mes
-        if pd.notna(sc):
+        # Sin mes anterior sin licencia → último imponible ingresado por el usuario o, si no hay,
+        # sueldo de contrato del mismo registro; en ambos casos con tope del mes
+        if manuales_ult and r in manuales_ult:
+            v_man = manuales_ult[r]
+            valor = int(round(min(v_man, t))) if pd.notna(t) else int(v_man)
+        elif pd.notna(sc):
             valor = int(round(min(sc, t))) if pd.notna(t) else int(sc)
         else:
             valor = TXT_IMP_NO_ENCONTRADO
@@ -1011,13 +1025,15 @@ def sin_mes_anterior_sin_lic(df):
     return pd.Series(resultado, index=df.index)
 
 
-def informe_licencias_sin_imponible(df, sin_mes_ant, filas_manuales=None):
+def informe_licencias_sin_imponible(df, sin_mes_ant, filas_manuales=None, filas_ult_manual=None):
     """
     Informe de registros con días de licencia (1116) > 0 sin último imponible sin licencia
     (no hay un mes anterior sin licencia del mismo Rut). Columna 'Origen ultImpSinLic_entrada':
-    sueldo de contrato del listado, sueldo ingresado manualmente o pendiente.
+    último imponible ingresado manualmente, sueldo de contrato del listado, sueldo ingresado manualmente o pendiente.
+    filas_ult_manual: posiciones con último imponible sin licencia ingresado por el usuario.
     """
-    manuales = set((filas_manuales or {}).get(COL_ULT_IMP_SIN_LIC, []))
+    ult_manual = set(filas_ult_manual or [])
+    manuales = set((filas_manuales or {}).get(COL_ULT_IMP_SIN_LIC, [])) - ult_manual
     cols = [COL_MES_PROCESO, _buscar_col_rut(df), _buscar_col_codigo(df, COL_FECHA_INI_DT), COL_NUM_CONTRATO,
             COL_EMPRESA, _buscar_col_codigo(df, COL_DIAS_TRAB_DT), _buscar_col_codigo(df, COL_DIAS_LIC_DT),
             _buscar_col_codigo(df, COL_IMP_TRIB_DT), _buscar_col_codigo(df, COL_IMP_NO_TRIB_DT),
@@ -1027,6 +1043,8 @@ def informe_licencias_sin_imponible(df, sin_mes_ant, filas_manuales=None):
     out = df.iloc[posiciones][cols].copy()
 
     def origen(pos, valor):
+        if pos in ult_manual:
+            return ORIGEN_ULT_IMP_MANUAL
         if valor == TXT_IMP_NO_ENCONTRADO:
             return "Pendiente: imponible no encontrado (falta sueldo de contrato)"
         if pos in manuales:
@@ -1405,6 +1423,11 @@ def aplicar_manuales(df, manuales):
         resueltas = [i for i, (a, d) in enumerate(zip(antes, despues)) if a and not d]
         if resueltas:
             modificadas.setdefault(COL_ULT_IMP_SIN_LIC, []).extend(resueltas)
+    return _recalcular_dependientes(df), modificadas
+
+
+def _recalcular_dependientes(df):
+    """Vuelve a calcular las columnas que dependen de ultImpSinLic_entrada."""
     if COL_IMP_MES_ANT_LIC in df.columns:
         df[COL_IMP_MES_ANT_LIC] = calcular_impo_mes_ant_lic(df)
     if COL_IMPONIBLE_LIC in df.columns:
@@ -1413,7 +1436,223 @@ def aplicar_manuales(df, manuales):
         df[COL_IMPO_VALIDADO] = calcular_impo_validado(df)
     if COL_BASECES_VALIDADO in df.columns:
         df[COL_BASECES_VALIDADO] = calcular_impo_validado(df, "topeces_entrada", COL_BASECES_VALIDADO)
-    return df, modificadas
+    return df
+
+
+def tabla_ult_imp_pendientes(df, mascara):
+    """
+    Una fila por Rut con registros con licencia sin un mes anterior sin licencia (mascara), con los meses,
+    la cantidad de registros y el sueldo de contrato que se usaría si no se ingresa el último imponible.
+    """
+    columnas = [COL_PLANT_RUT, "Meses", "Registros", "Sueldo de contrato"]
+    sub = df[mascara.values]
+    if sub.empty:
+        return pd.DataFrame(columns=columnas)
+    col_rut = _buscar_col_rut(df)
+    filas = []
+    for rut, g in sub.groupby(sub[col_rut].map(normalizar_rut), sort=True):
+        sc = pd.to_numeric(g[COL_SUELDO_CONTRATO], errors="coerce").dropna()
+        filas.append({COL_PLANT_RUT: rut, "Meses": ", ".join(sorted(g[COL_MES_PROCESO].unique())),
+                      "Registros": len(g), "Sueldo de contrato": int(sc.iloc[0]) if len(sc) else None})
+    out = pd.DataFrame(filas, columns=columnas)
+    out["Sueldo de contrato"] = out["Sueldo de contrato"].astype("Int64")
+    return out
+
+
+def aplicar_ult_imp_manual(df, valores):
+    """
+    valores: {rut normalizado: último imponible sin licencia ingresado por el usuario}.
+    En los registros con licencia sin mes anterior sin licencia de esos Rut, ultImpSinLic_entrada pasa a ser
+    min(valor ingresado, tope del mes); los demás Rut siguen con la lógica actual (sueldo de contrato).
+    Retorna (df, posiciones modificadas).
+    """
+    if not valores or COL_ULT_IMP_SIN_LIC not in df.columns:
+        return df, []
+    df = df.copy()
+    ruts = df[_buscar_col_rut(df)].map(normalizar_rut).tolist()
+    sin_ant = sin_mes_anterior_sin_lic(df).tolist()
+    df[COL_ULT_IMP_SIN_LIC] = calcular_ult_imp_sin_lic(df, valores)
+    posiciones = [i for i, (s_, r) in enumerate(zip(sin_ant, ruts)) if s_ and r in valores]
+    return _recalcular_dependientes(df), posiciones
+
+
+def excel_plantilla_ult_imp(pend, guardados=None):
+    """Plantilla Excel con los Rut pendientes para completar el último imponible sin licencia."""
+    guardados = guardados or {}
+    wb = Workbook()
+    ws = wb.active
+    ws.title = "Imponibles"
+    encabezado = [COL_PLANT_RUT, "Meses con licencia", "Registros", "Sueldo de contrato (referencia)",
+                  COL_PLANT_ULT_IMP]
+    ws.append(encabezado)
+    for _, f in pend.iterrows():
+        sc = f["Sueldo de contrato"]
+        ws.append([f[COL_PLANT_RUT], f["Meses"], int(f["Registros"]),
+                   None if sc is None or pd.isna(sc) else int(sc), guardados.get(f[COL_PLANT_RUT])])
+    relleno, fuente = PatternFill("solid", fgColor="1A2744"), Font(bold=True, color="FFFFFF", size=10)
+    relleno_ing = PatternFill("solid", fgColor=VERDE_CLARO)
+    for j, celda in enumerate(ws[1], start=1):
+        celda.fill, celda.font = relleno, fuente
+        celda.alignment = Alignment(horizontal="center", vertical="center", wrap_text=True)
+        ws.column_dimensions[celda.column_letter].width = [16, 30, 11, 20, 22][j - 1]
+    for fila in ws.iter_rows(min_row=2):
+        fila[3].number_format = "#,##0"
+        fila[4].number_format = "#,##0"
+        fila[4].fill = relleno_ing
+    ws.cell(1, 5).fill = PatternFill("solid", fgColor="00B4FF")
+    ws.row_dimensions[1].height = 32
+    ws.freeze_panes = "A2"
+    ins = wb.create_sheet("Instrucciones")
+    for linea in [
+        "Último imponible sin licencia",
+        "",
+        "Estos trabajadores tienen licencia médica y en los CSV subidos no hay un mes anterior sin licencia,",
+        "por lo que el programa no puede calcular su último imponible sin licencia.",
+        "",
+        f"1. Completa la columna '{COL_PLANT_ULT_IMP}' (en pesos, sin decimales) de los trabajadores que tengas.",
+        "2. Deja en blanco los que no tengas: para ellos se usa el sueldo de contrato (con tope).",
+        "3. No cambies los Rut ni el nombre de las columnas.",
+        "4. Sube el archivo en la ventana 'Último imponible sin licencia' del paso 2.",
+        "",
+        "Al valor ingresado se le aplica el tope imponible de cada mes.",
+    ]:
+        ins.append([linea])
+    ins["A1"].font = Font(bold=True, size=12, color="1E5591")
+    ins.column_dimensions["A"].width = 110
+    out = io.BytesIO()
+    wb.save(out)
+    return out.getvalue()
+
+
+def _monto_desde_texto(v):
+    """Convierte un valor de la plantilla a entero (acepta 1.234.567, $ 1.234.567, 1234567,0). None si no sirve."""
+    if v is None or (isinstance(v, float) and pd.isna(v)):
+        return None
+    if isinstance(v, (int, float)):
+        return int(round(v))
+    txt = re.sub(r"[\s$]", "", str(v))
+    if not txt:
+        return None
+    txt = txt.split(",")[0].replace(".", "")
+    return int(txt) if txt.isdigit() else None
+
+
+def leer_plantilla_ult_imp(archivo, ruts_pendientes):
+    """
+    Lee la plantilla completada. Retorna (valores {rut: monto > 0}, avisos [texto]).
+    Ignora Rut que no están pendientes, montos vacíos, en 0 o no numéricos (con aviso).
+    """
+    df = _leer_excel_con_encabezado(archivo, [COL_PLANT_RUT, COL_PLANT_ULT_IMP])
+    pend = set(ruts_pendientes)
+    valores, avisos, fuera, malos, repetidos = {}, [], [], [], []
+    for rut_txt, monto in zip(df[COL_PLANT_RUT], df[COL_PLANT_ULT_IMP]):
+        if rut_txt is None or (isinstance(rut_txt, float) and pd.isna(rut_txt)):
+            continue
+        rut = normalizar_rut(rut_txt)
+        v = _monto_desde_texto(monto)
+        if monto is not None and not (isinstance(monto, float) and pd.isna(monto)) and (v is None or v <= 0) \
+                and str(monto).strip() not in ("", "0"):
+            malos.append(rut)
+            continue
+        if not v or v <= 0:
+            continue
+        if rut not in pend:
+            fuera.append(rut)
+            continue
+        if rut in valores:
+            repetidos.append(rut)
+            continue
+        valores[rut] = v
+    if fuera:
+        avisos.append(f"Rut que no están pendientes (se ignoraron): {', '.join(fuera)}")
+    if malos:
+        avisos.append(f"Montos que no son un número válido (se ignoraron): {', '.join(malos)}")
+    if repetidos:
+        avisos.append(f"Rut repetidos (se usó la primera fila): {', '.join(repetidos)}")
+    return valores, avisos
+
+
+def _usar_sueldo_contrato():
+    """Acción 'Usar sueldo de contrato': lógica actual para todos los Rut pendientes."""
+    for r in st.session_state.get(CLAVE_ULT_IMP_MANUAL, {}):
+        st.session_state.pop(f"ultimp_{r}", None)
+    st.session_state[CLAVE_ULT_IMP_MANUAL] = {}
+    st.session_state[CLAVE_ULT_IMP_MODO] = "contrato"
+
+
+def ventana_ult_imp(pend):
+    """Ventana emergente para ingresar el último imponible sin licencia por Rut (en pantalla o con plantilla Excel)."""
+    guardados = st.session_state.get(CLAVE_ULT_IMP_MANUAL, {})
+    ruts = pend[COL_PLANT_RUT].tolist()
+
+    def guardar(valores):
+        for r in ruts:
+            st.session_state.pop(f"ultimp_{r}", None)
+        st.session_state[CLAVE_ULT_IMP_MANUAL] = valores
+        st.session_state[CLAVE_ULT_IMP_MODO] = "manual" if valores else "contrato"
+        st.rerun()
+
+    def contenido():
+        st.markdown("Estos trabajadores tienen licencia y en los CSV subidos no hay un mes anterior sin licencia. "
+                    "Ingresa su **último imponible sin licencia** si lo tienes; a los que dejes en blanco se les "
+                    "aplica la lógica actual (**sueldo de contrato**). En ambos casos se aplica el tope imponible "
+                    "del mes.")
+        with st.expander("📄 Completar con una plantilla Excel", expanded=len(ruts) > 10):
+            c1, c2 = st.columns(2)
+            c1.download_button("⬇️ Descargar plantilla", data=excel_plantilla_ult_imp(pend, guardados),
+                               file_name=f"plantilla_ultimo_imponible_{datetime.now():%Y%m%d_%H%M%S}.xlsx",
+                               mime="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet",
+                               key="dl_plantilla_ultimp", use_container_width=True)
+            arch = st.file_uploader("Sube la plantilla completada", type=["xlsx"], key="up_plantilla_ultimp")
+            if c2.button("📥 Cargar desde Excel", disabled=arch is None, use_container_width=True,
+                         key="btn_cargar_ultimp"):
+                try:
+                    valores, avisos = leer_plantilla_ult_imp(arch, ruts)
+                except Exception as e:  # noqa: BLE001
+                    st.error(f"No se pudo leer la plantilla: {e}")
+                else:
+                    for a in avisos:
+                        st.warning(a)
+                    if not valores:
+                        st.error("La plantilla no trae ningún último imponible para los Rut pendientes.")
+                    elif not avisos:
+                        guardar(valores)
+                    else:
+                        st.session_state["ultimp_excel_ok"] = valores
+            if st.session_state.get("ultimp_excel_ok"):
+                n = len(st.session_state["ultimp_excel_ok"])
+                if st.button(f"Usar los {n} imponible(s) de la plantilla", type="primary", key="btn_ultimp_excel_ok"):
+                    guardar(st.session_state.pop("ultimp_excel_ok"))
+        with st.form("form_ultimp", border=False):
+            valores = {}
+            for _, fila in pend.iterrows():
+                r = fila[COL_PLANT_RUT]
+                sc = fila["Sueldo de contrato"]
+                ref = (f"sueldo de contrato ${_miles(sc)}" if sc is not None and not pd.isna(sc)
+                       else "sin sueldo de contrato")
+                c_rut, c_val = st.columns([3, 2])
+                c_rut.markdown(f"**{r}**  \n{fila['Registros']} registro(s): {fila['Meses']} · {ref}")
+                valores[r] = c_val.number_input(
+                    f"Último imponible {r}", min_value=0, step=1, value=guardados.get(r),
+                    placeholder="En blanco: sueldo de contrato", label_visibility="collapsed", key=f"ultimp_{r}")
+            c1, c2 = st.columns(2)
+            ok = c1.form_submit_button("💾 Guardar", type="primary", use_container_width=True)
+            borrar = c2.form_submit_button("🗑️ Borrar ingresos", use_container_width=True)
+        if ok:
+            guardar({r: int(v) for r, v in valores.items() if v is not None and v > 0})
+        if borrar:
+            for r in ruts:
+                st.session_state.pop(f"ultimp_{r}", None)
+            st.session_state[CLAVE_ULT_IMP_MANUAL] = {}
+            st.session_state.pop(CLAVE_ULT_IMP_MODO, None)
+            st.rerun()
+
+    deco = _dialogo("✍️ Último imponible sin licencia")
+    if deco:
+        deco(contenido)()
+    else:   # Streamlit antiguo: se muestra en la página
+        with st.container(border=True):
+            contenido()
 
 
 def _dialogo(titulo):
@@ -1597,7 +1836,7 @@ def _ir_a(paso):
 
 def _empezar_otra():
     ronda = st.session_state.get(CLAVE_RONDA, 0) + 1
-    for k in [CLAVE_PASO, CLAVE_RANGO, CLAVE_IMP_MANUAL, CLAVE_COMPENSA]:
+    for k in [CLAVE_PASO, CLAVE_RANGO, CLAVE_IMP_MANUAL, CLAVE_COMPENSA, CLAVE_ULT_IMP_MANUAL, CLAVE_ULT_IMP_MODO]:
         st.session_state.pop(k, None)
     st.session_state[CLAVE_RONDA] = ronda
 
@@ -1836,8 +2075,20 @@ def main():
     claves_pend = {f"{d}|{r}" for d, r in zip(pendientes["Dato"], pendientes["Rut trabajador"])}
     manuales = {k: v for k, v in st.session_state.get(CLAVE_IMP_MANUAL, {}).items() if k in claves_pend}
     df_cons, filas_manuales = aplicar_manuales(df_cons, manuales)
-    sin_mes_ant = sin_mes_anterior_sin_lic(df_cons)[en_rango.values].reset_index(drop=True)
+    # Último imponible sin licencia: ingresado por el usuario (por Rut) o lógica actual (sueldo de contrato)
+    sin_ant_todo = sin_mes_anterior_sin_lic(df_cons)
+    pend_ult = tabla_ult_imp_pendientes(df_cons, sin_ant_todo & en_rango.values)
+    ruts_pend_ult = set(pend_ult[COL_PLANT_RUT])
+    modo_ult = st.session_state.get(CLAVE_ULT_IMP_MODO)
+    ult_manuales = ({r: v for r, v in st.session_state.get(CLAVE_ULT_IMP_MANUAL, {}).items() if r in ruts_pend_ult}
+                    if modo_ult == "manual" else {})
+    df_cons, pos_ult = aplicar_ult_imp_manual(df_cons, ult_manuales)
+    if pos_ult:
+        filas_manuales[COL_ULT_IMP_SIN_LIC] = sorted(set(filas_manuales.get(COL_ULT_IMP_SIN_LIC, [])) | set(pos_ult))
+        filas_manuales[FILAS_ULT_IMP_MANUAL] = pos_ult
+    sin_mes_ant = sin_ant_todo[en_rango.values].reset_index(drop=True)
     df_cons, filas_manuales = filtrar_rango(df_cons, en_rango, filas_manuales)
+    filas_ult_manual = filas_manuales.pop(FILAS_ULT_IMP_MANUAL, [])
     try:
         df_sin_cuad = df_cons
         df_cons = agregar_cuadratura_liquido(df_sin_cuad.copy(), tipos_lre)
@@ -1954,6 +2205,13 @@ def main():
         col_dato, rut = clave.split("|", 1)
         log.advertencia(DATOS_MANUALES[col_dato]["etiqueta"],
                         f"{col_dato} ingresado manualmente para Rut {rut}: {v:,}".replace(",", "."))
+    for rut, v in ult_manuales.items():
+        log.advertencia("Último imponible sin licencia",
+                        f"{COL_ULT_IMP_SIN_LIC} ingresado manualmente para Rut {rut}: {v:,} (con tope del mes)".replace(",", "."))
+    if not pend_ult.empty and modo_ult == "contrato":
+        log.info("Último imponible sin licencia",
+                 f"El usuario eligió usar el sueldo de contrato (con tope) para los {len(pend_ult)} trabajador(es) "
+                 f"con licencia sin un mes anterior sin licencia.")
     for col_dato, posiciones in filas_manuales.items():
         mascara_man = pd.Series(False, index=df_cons.index)
         mascara_man.iloc[posiciones] = True
@@ -1966,11 +2224,16 @@ def main():
                                               f"(filas marcadas en amarillo en el Excel).")
             log.registros(df_cons, sin, f"{col_dato} = '{info['texto']}'",
                           _buscar_col_codigo(df_cons, COL_DIAS_LIC_DT), "Días licencia: ")
-    df_inf_lic = informe_licencias_sin_imponible(df_cons, sin_mes_ant, filas_manuales)
+    df_inf_lic = informe_licencias_sin_imponible(df_cons, sin_mes_ant, filas_manuales, filas_ult_manual)
     if not df_inf_lic.empty:
         n_pend_inf = int((df_inf_lic[COL_ULT_IMP_SIN_LIC] == TXT_IMP_NO_ENCONTRADO).sum())
-        msg_inf = (f"{len(df_inf_lic)} registro(s) con licencia sin un mes anterior sin licencia: como último imponible "
-                   f"se usó el sueldo de contrato" + (f" ({n_pend_inf} aún sin sueldo)." if n_pend_inf else "."))
+        n_man_inf = int((df_inf_lic["Origen ultImpSinLic_entrada"] == ORIGEN_ULT_IMP_MANUAL).sum())
+        n_sc_inf = len(df_inf_lic) - n_man_inf - n_pend_inf
+        partes = ([f"{n_man_inf} con último imponible ingresado a mano"] if n_man_inf else []) + \
+                 ([f"{n_sc_inf} con sueldo de contrato"] if n_sc_inf else []) + \
+                 ([f"{n_pend_inf} aún sin sueldo"] if n_pend_inf else [])
+        msg_inf = (f"{len(df_inf_lic)} registro(s) con licencia sin un mes anterior sin licencia: "
+                   f"{', '.join(partes)} (todos con tope del mes).")
         av.items[TEMAS[4]].append(("aviso", msg_inf + " Revísalos en el informe de licencias."))
         log.info("Informe licencias sin último imponible", msg_inf)
     n_no_val = df_cons.attrs.get("cuadratura_no_validados", 0)
@@ -2047,6 +2310,8 @@ def main():
 
     # Acciones pendientes: (clave, resuelta)
     acciones = [("conceptos", con_codigo.empty)]
+    if not pend_ult.empty:
+        acciones.append(("ultimp", modo_ult in ("manual", "contrato")))
     if not pendientes.empty:
         acciones.append(("manuales", faltan_datos == 0))
     if n_comp:
@@ -2118,6 +2383,36 @@ def main():
                                           key="dl_conceptos_lre", use_container_width=True)
                         with st.expander("Ver conceptos con código"):
                             st.dataframe(con_codigo, use_container_width=True, hide_index=True)
+                elif clave_acc == "ultimp":
+                    n_ult, n_man = len(pend_ult), len(ult_manuales)
+                    ruts_txt = ", ".join(pend_ult[COL_PLANT_RUT].head(5)) + (" …" if n_ult > 5 else "")
+                    a, b = st.columns([3, 1])
+                    with a:
+                        if modo_ult == "manual":
+                            ui.item(f"Último imponible sin licencia ingresado para {n_man} de {n_ult} trabajador(es)",
+                                    ("Los demás usan el sueldo de contrato. " if n_man < n_ult else "")
+                                    + "Se aplica el tope imponible del mes. Puedes modificarlos.", "ok")
+                        elif modo_ult == "contrato":
+                            ui.item(f"Se usa el sueldo de contrato como último imponible ({n_ult} trabajador(es))",
+                                    "Con tope imponible del mes. Si consigues los últimos imponibles reales, "
+                                    "puedes ingresarlos.", "ok")
+                        else:
+                            ui.item(f"{n_ult} trabajador(es) con licencia sin un mes anterior sin licencia en los CSV",
+                                    f"**{ruts_txt}**. Si tienes su último imponible sin licencia, ingrésalo (en pantalla "
+                                    f"o con una plantilla Excel). Si no, usa el sueldo de contrato (lógica actual).",
+                                    "warn", "persona")
+                    with b:
+                        if st.button("Modificar imponibles" if modo_ult == "manual" else "Ingresar imponibles",
+                                     key="btn_ultimp", type="primary" if modo_ult is None else "secondary",
+                                     use_container_width=True):
+                            ventana_ult_imp(pend_ult)
+                        if modo_ult != "contrato":
+                            st.button("Usar sueldo de contrato", key="btn_ultimp_contrato", use_container_width=True,
+                                      on_click=_usar_sueldo_contrato)
+                    with st.expander(f"Ver trabajadores ({n_ult})"):
+                        vista_ult = pend_ult.copy()
+                        vista_ult["Último imponible ingresado"] = vista_ult[COL_PLANT_RUT].map(ult_manuales)
+                        st.dataframe(vista_ult, use_container_width=True, hide_index=True)
                 elif clave_acc == "manuales":
                     n_rut = pendientes["Rut trabajador"].nunique()
                     ruts_txt = ", ".join(sorted(pendientes["Rut trabajador"].unique())[:5])
@@ -2221,6 +2516,8 @@ def main():
             extras.append(f"{n_comp} ajuste(s) compensaSobre")
         if manuales:
             extras.append(f"{len(manuales)} sueldo(s) ingresado(s) a mano")
+        if ult_manuales:
+            extras.append(f"{len(ult_manuales)} último(s) imponible(s) ingresado(s) a mano")
         detalle = (f"{_miles(len(df_carga))} filas · {df_carga['Id empleado'].nunique()} trabajador(es) · "
                    f"{len(meses)} mes(es)" + ("".join(f" · {x}" for x in extras)))
         if res_e2["estado"] == "ok":
@@ -2246,7 +2543,7 @@ def main():
     if not df_inf_lic.empty:
         descargas.append((f"Para revisar · {len(df_inf_lic)} registro(s)", "warn",
                           "Informe de licencias sin último imponible",
-                          "Registros con licencia en que se usó el sueldo de contrato.",
+                          "Registros con licencia sin mes anterior sin licencia y de dónde salió su último imponible.",
                           nombre_inf, excel_informe_licencias(df_inf_lic), False))
     n_err = sum(1 for r in log.resumen if r["Tipo"] == "ERROR")
     n_adv = sum(1 for r in log.resumen if r["Tipo"] == "ADVERTENCIA")
@@ -2276,8 +2573,8 @@ def main():
     if res_e2["estado"] != "error":
         with st.expander(f"📊 Resumen por concepto ({len(res_e2['resumen'])} conceptos)"):
             st.dataframe(res_e2["resumen"], use_container_width=True, hide_index=True)
-    st.warning("⚠️ Descarga los archivos antes de salir: los sueldos ingresados a mano y el ajuste compensaSobre "
-               "se pierden al cerrar o recargar la página.")
+    st.warning("⚠️ Descarga los archivos antes de salir: los sueldos e imponibles ingresados a mano y el ajuste "
+               "compensaSobre se pierden al cerrar o recargar la página.")
     c1, _, c3 = st.columns([1.4, 1, 1.4])
     c1.button("← Volver a Archivo de carga", key="nav_back_p5", on_click=_ir_a, args=(4,), use_container_width=True)
     c3.button("Empezar otra migración", key="nav_otra", on_click=_empezar_otra, use_container_width=True)
